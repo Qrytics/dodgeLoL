@@ -41,7 +41,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173/games/dodgeLoL/](http://localhost:5173/games/dodgeLoL/) in your browser.
+Open [http://localhost:5173/](http://localhost:5173/) in your browser.
 
 ### Build for production
 
@@ -49,7 +49,7 @@ Open [http://localhost:5173/games/dodgeLoL/](http://localhost:5173/games/dodgeLo
 npm run build
 ```
 
-The production-ready files will be in the `dist/` folder, configured with the base path `/games/dodgeLoL/`.
+The production-ready files will be in the `dist/` folder, using relative asset paths so the game can be hosted from subpaths (e.g. GitHub Pages repo sites like `/dodgeLoL/`).
 
 ### Preview the production build locally
 

@@ -5,5 +5,6 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: '/games/dodgeLoL/',
+  // Use relative asset paths so the build works under GitHub Pages subpaths.
+  base: './',
 })
