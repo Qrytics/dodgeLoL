@@ -10,14 +10,19 @@ A high-intensity micro-mechanics trainer inspired by [loldodgegame.com](https://
 
 | Control | Action |
 |---------|--------|
-| **Right-click** | Move your character to the clicked position (click is inverse-projected from iso screen to world space) |
-| **D** or **F** | Flash — instantly teleport up to 220 world-units toward your cursor (15s cooldown) |
+| **Right-click** | Move your character to the clicked position (inverse-projected from iso screen to world space) |
+| **D** or **F** | Flash — instantly teleport up to 230 world-units toward your cursor |
+| **ESC** | Return to the main menu at any time |
+| **SPACE** | Restart after game over |
+| **Left-click** | Select difficulty on the menu screen |
 
 ### Rules
+- Choose a difficulty on the menu screen: **Easy**, **Normal**, **Hard**, or **Insane**.
 - Survive as long as possible against incoming skillshots.
-- Each projectile that hits you deals damage (shown in the HP bar above your character).
-- Difficulty **escalates every 10 seconds**: projectiles get faster and spawn more frequently.
+- Each projectile/AoE that hits you deals damage (shown in the HP bar above your character).
+- Difficulty **escalates** over time: projectiles get faster and spawn more frequently.
 - Your best time (high score) is tracked in-session.
+- A **Back to Games** button in the top-left links back to the games hub.
 
 ---
 
@@ -61,13 +66,15 @@ npm run preview
 
 ## 🎨 Isometric Perspective
 
-The game world is an **800×800 world-unit square** rendered using a classic 30° isometric projection:
+The game world is a **900×900 world-unit square** rendered using a dynamic 30° isometric projection:
 
+- The canvas fills the **entire browser viewport** and recalculates the projection on every resize.
+- `makeProjection(canvasW, canvasH)` computes scale, origin, and projection functions dynamically so the iso diamond always fills the available space.
 - All gameplay logic (movement, collision, spawning) runs in flat 2-D world coordinates.
-- A `worldToScreen` / `screenToWorld` projection pair maps between world and canvas space at runtime.
-- The isometric grid, player (cylinder), projectiles, AoE rings, and ripples are all drawn in iso-space.
+- A `worldToScreen` / `screenToWorld` pair maps between world and canvas space.
 - Mouse clicks are **inverse-projected** back to world coordinates so movement targets feel precise.
-- Projectile travel directions are computed in world space and their screen-space angle is derived from velocity projection, giving correct visual trajectories without double-accounting for the iso distortion.
+- Projectile travel directions are computed in world space and their screen-space angle is derived from velocity projection.
+- A subtle vignette and arena fill provide depth without obscuring gameplay.
 
 ---
 
@@ -115,8 +122,8 @@ The game automatically deploys to **mario-belmonte.com/games/dodgeLoL** via GitH
 - All movement operates in flat **world space**; the iso camera is purely presentational.
 
 ### Flash Ability (D/F key)
-- Instantly teleports the player up to **220 world-units** toward the cursor.
-- **15-second** gameplay cooldown (displayed as 300s in the UI overlay for style purposes).
+- Instantly teleports the player up to **230 world-units** toward the cursor.
+- Cooldown varies by difficulty (10s Easy → 22s Insane), displayed as ~300s in the UI for League flavour.
 - Flash cooldown shown as an arc around the player and as a HUD element.
 
 ### Projectile Engine
@@ -124,12 +131,24 @@ The game automatically deploys to **mario-belmonte.com/games/dodgeLoL** via GitH
 - **Circular AoE** (Morg Q / Leona R style): Delayed explosions with a 1.5s warning indicator. The exploding ring fills as the timer counts down.
 
 ### Collision Detection
-- **OBB (Oriented Bounding Box)**: Linear projectiles use a precise circle-vs-OBB check via axis-projection in world space, accounting for the projectile's travel angle.
-- **Circle-to-Circle**: AoE explosions check the distance between centers in world space.
-- The player's **hitbox** is slightly smaller than the visible character for fairness.
+- **Circle-to-Circle** for linear projectiles: uses the projectile's effective radius (~30% of its longest dimension) vs the player hitbox (radius 9). Much more forgiving than the old OBB approach — eliminates false "phantom" deaths.
+- **Circle-to-Circle** for AoE explosions: checks distance between centres in world space.
+- The player's **hitbox radius (9)** is significantly smaller than the visual body (~16) for fairness.
+
+### Difficulty Presets
+
+| Setting | Easy | Normal | Hard | Insane |
+|---------|------|--------|------|--------|
+| Spawn interval | 2000ms | 1400ms | 1000ms | 700ms |
+| Projectile speed | 140 | 200 | 260 | 320 |
+| AoE interval | 6000ms | 4000ms | 3000ms | 2200ms |
+| Escalation period | 15s | 10s | 8s | 6s |
+| Projectile damage | 15 | 20 | 25 | 30 |
+| AoE damage | 25 | 35 | 40 | 50 |
+| Flash cooldown | 10s | 15s | 18s | 22s |
 
 ### Escalation
-Every 10 seconds:
+Every escalation period (varies by difficulty):
 - Projectile speed increases.
 - Spawn interval decreases (more frequent projectiles).
 - AoE spawn frequency increases.
@@ -138,20 +157,22 @@ Every 10 seconds:
 
 ## � Bug Fixes & Improvements (April 2026)
 
-- **Isometric camera**: full top-down iso perspective with `worldToScreen` / `screenToWorld` projection.
-- **Accurate OBB collision**: linear projectiles now use an oriented bounding-box (OBB) check via axis-projection instead of an AABB approximation — drastically reduces phantom hits.
-- **Correct inverse mouse projection**: right-click world coordinates are computed by inverting the iso transform, so you navigate exactly where you click.
-- **Mouse tracking in world space**: Flash now targets the correct world position, not raw screen pixels.
-- **AoE despawn fix**: explosion particles are properly removed after their animation completes (was leaking objects before).
-- **Isometric player cylinder**: player rendered as a 3-D iso cylinder with top-cap highlight and a ground shadow ellipse.
-- **Isometric projectiles**: velocity is projected to screen-angle; body is flattened on Y to match the iso plane.
-- **Isometric AoE / ripples**: all circles are rendered as iso ellipses on the ground plane.
-- **HUD polish**: rounded panels, better flash button layout, flash icon shows ⚡ when ready.
-- **Arena border**: iso diamond border drawn around the playfield for spatial clarity.
-- **`dt` cap**: delta-time is capped at 50 ms to prevent physics tunnelling after tab switches.
-- **Ripple cleanup**: expired ripples are filtered every frame to avoid unbounded array growth.
-- **Removed stale `playerVx/Vy`**: unused velocity fields removed; movement is purely target-driven.
-- **Canvas size**: expanded to 960×640 to better frame the iso diamond.
+- **Full-screen canvas**: the game fills the entire browser viewport and dynamically resizes.
+- **Dynamic iso projection**: `makeProjection()` recomputes scale + origin on every resize so the diamond always fills the screen — no more tiny corner rendering.
+- **Difficulty selector**: four presets (Easy / Normal / Hard / Insane) with left-click selection on the menu.
+- **Restart support**: right-click or SPACE on game-over restarts immediately; ESC returns to menu.
+- **Back to Games button**: HTML overlay link in the top-left corner → `mario-belmonte.com/games`.
+- **Forgiving hitboxes**: switched from OBB to circle-circle collision with a small effective radius; player hitbox reduced to 9 (from 13). Eliminates phantom deaths.
+- **Hit particles**: projectile and AoE impacts spawn orange particle bursts for visual feedback.
+- **Vignette + arena fill**: subtle vignette gradient and semi-transparent arena fill for depth.
+- **Correct inverse mouse projection**: right-click world coordinates are computed by inverting the iso transform.
+- **AoE despawn fix**: explosion particles are properly removed after their animation completes.
+- **Isometric player cylinder**: 3-D iso cylinder with top-cap highlight and ground shadow.
+- **Isometric projectiles**: velocity projected to screen-angle; body flattened to match iso plane.
+- **Isometric AoE / ripples**: all circles rendered as proper iso ellipses.
+- **HUD polish**: rounded panels, responsive font sizing, flash button with ⚡ icon.
+- **`dt` cap**: delta-time capped at 50 ms to prevent physics tunnelling.
+- **Ripple + particle cleanup**: expired effects filtered every frame.
 
 ---
 

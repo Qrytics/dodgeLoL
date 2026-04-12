@@ -1,92 +1,64 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 
-// ─── Canvas & World constants ─────────────────────────────────────────────────
-const CANVAS_W = 960;
-const CANVAS_H = 640;
+// ─── World constants (all gameplay runs in flat world-space) ──────────────────
+const WORLD_W = 900;
+const WORLD_H = 900;
 
-// The "game world" is a square grid. All gameplay logic runs in world coords.
-const WORLD_W = 800;
-const WORLD_H = 800;
-
-// ─── Isometric projection ─────────────────────────────────────────────────────
-// Standard cabinet iso: x-axis goes right-down, y-axis goes left-down.
-// We project world (wx, wy) → screen (sx, sy).
-const ISO_SCALE_X = 0.866; // cos(30°)
-const ISO_SCALE_Y = 0.5;   // sin(30°)
-const ISO_TILE   = 60;     // logical tile size in world coords
-const ORIGIN_X = CANVAS_W / 2; // screen origin
-const ORIGIN_Y = 80;           // screen origin (top of iso diamond)
-
-function worldToScreen(wx, wy) {
-  // centre world on origin
-  const ox = wx - WORLD_W / 2;
-  const oy = wy - WORLD_H / 2;
-  const sx = ORIGIN_X + (ox - oy) * ISO_SCALE_X;
-  const sy = ORIGIN_Y + (ox + oy) * ISO_SCALE_Y;
-  return { sx, sy };
-}
-
-function screenToWorld(sx, sy) {
-  // Inverse of worldToScreen
-  const rx = sx - ORIGIN_X;
-  const ry = sy - ORIGIN_Y;
-  // rx =  (ox - oy) * ISO_SCALE_X
-  // ry =  (ox + oy) * ISO_SCALE_Y
-  const ox = rx / (2 * ISO_SCALE_X) + ry / (2 * ISO_SCALE_Y);
-  const oy = ry / (2 * ISO_SCALE_Y) - rx / (2 * ISO_SCALE_X);
-  return { wx: ox + WORLD_W / 2, wy: oy + WORLD_H / 2 };
-}
+// ─── Difficulty presets ───────────────────────────────────────────────────────
+const DIFFICULTIES = {
+  easy:   { label: 'Easy',   spawnInterval: 2000, projSpeed: 140, aoeInterval: 6000, escalationInterval: 15, speedInc: 15, spawnDec: 50,  minSpawn: 600, projDmg: 15, aoeDmg: 25, flashCd: 10 },
+  normal: { label: 'Normal', spawnInterval: 1400, projSpeed: 200, aoeInterval: 4000, escalationInterval: 10, speedInc: 25, spawnDec: 80,  minSpawn: 350, projDmg: 20, aoeDmg: 35, flashCd: 15 },
+  hard:   { label: 'Hard',   spawnInterval: 1000, projSpeed: 260, aoeInterval: 3000, escalationInterval: 8,  speedInc: 35, spawnDec: 100, minSpawn: 250, projDmg: 25, aoeDmg: 40, flashCd: 18 },
+  insane: { label: 'Insane', spawnInterval: 700,  projSpeed: 320, aoeInterval: 2200, escalationInterval: 6,  speedInc: 45, spawnDec: 120, minSpawn: 180, projDmg: 30, aoeDmg: 50, flashCd: 22 },
+};
 
 // ─── Game constants ───────────────────────────────────────────────────────────
-const PLAYER_RADIUS = 18;
-const PLAYER_HITBOX_RADIUS = 13;
-const PLAYER_SPEED = 250; // world-units/s
-const FLASH_RANGE = 220;
-const FLASH_COOLDOWN = 15; // seconds (gameplay)
-const FLASH_VISUAL_COOLDOWN = 300; // shown in UI
+const PLAYER_RADIUS = 16;
+const PLAYER_HITBOX_RADIUS = 9;
+const PLAYER_SPEED = 260;
+const FLASH_RANGE = 230;
+const FLASH_VISUAL_COOLDOWN = 300;
 
-const BASE_SPAWN_INTERVAL = 1400; // ms
-const BASE_PROJECTILE_SPEED = 200; // world-units/s
-const PROJECTILE_W = 14;
-const PROJECTILE_H = 44;
+const PROJECTILE_W = 12;
+const PROJECTILE_H = 38;
 
-const AOE_RADIUS = 60;
-const AOE_DELAY = 1500; // ms
+const AOE_RADIUS = 55;
+const AOE_DELAY = 1500;
 
-const ESCALATION_INTERVAL = 10; // seconds
-const SPEED_INCREMENT = 25;
-const SPAWN_INTERVAL_DECREMENT = 80;
-const MIN_SPAWN_INTERVAL = 300;
-
+const ISO_TILE = 60;
 const ARRIVAL_THRESHOLD = 4;
 
-// ─── Helper functions ─────────────────────────────────────────────────────────
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
+function circleCircle(cx1, cy1, r1, cx2, cy2, r2) { return dist(cx1, cy1, cx2, cy2) < r1 + r2; }
+
+// ─── Dynamic isometric projection ────────────────────────────────────────────
+function makeProjection(canvasW, canvasH) {
+  const cosA = Math.cos(Math.PI / 6);
+  const sinA = Math.sin(Math.PI / 6);
+  const rawW = (WORLD_W + WORLD_H) * cosA;
+  const rawH = (WORLD_W + WORLD_H) * sinA;
+  const padding = 30;
+  const scale = Math.min((canvasW - padding * 2) / rawW, (canvasH - padding * 2) / rawH);
+  const originX = canvasW / 2;
+  const originY = canvasH / 2;
+
+  function worldToScreen(wx, wy) {
+    const ox = wx - WORLD_W / 2, oy = wy - WORLD_H / 2;
+    return { sx: originX + (ox - oy) * cosA * scale, sy: originY + (ox + oy) * sinA * scale };
+  }
+  function screenToWorld(sx, sy) {
+    const rx = (sx - originX) / scale, ry = (sy - originY) / scale;
+    return { wx: rx / (2 * cosA) + ry / (2 * sinA) + WORLD_W / 2, wy: ry / (2 * sinA) - rx / (2 * cosA) + WORLD_H / 2 };
+  }
+  return { worldToScreen, screenToWorld, scale, cosA, sinA };
 }
 
-function dist(ax, ay, bx, by) {
-  return Math.hypot(ax - bx, ay - by);
-}
-
-// Circle vs oriented rectangle in 2-D world space (OBB check via axis projection)
-function circleOBB(cx, cy, cr, px, py, halfW, halfH, angle) {
-  // Transform circle centre to OBB local space
-  const cos = Math.cos(-angle);
-  const sin = Math.sin(-angle);
-  const dx = cx - px;
-  const dy = cy - py;
-  const lx = dx * cos - dy * sin;
-  const ly = dx * sin + dy * cos;
-  const nearX = clamp(lx, -halfW, halfW);
-  const nearY = clamp(ly, -halfH, halfH);
-  return Math.hypot(lx - nearX, ly - nearY) < cr;
-}
-
-// Spawn projectile from a world-space edge aimed at (tx, ty)
+// ─── Spawners ─────────────────────────────────────────────────────────────────
 function spawnProjectile(tx, ty, speed) {
   const edge = Math.floor(Math.random() * 4);
-  const m = PROJECTILE_H;
+  const m = PROJECTILE_H + 20;
   let wx, wy;
   switch (edge) {
     case 0: wx = Math.random() * WORLD_W; wy = -m; break;
@@ -95,607 +67,455 @@ function spawnProjectile(tx, ty, speed) {
     default: wx = -m; wy = Math.random() * WORLD_H; break;
   }
   const angle = Math.atan2(ty - wy, tx - wx);
-  return {
-    type: 'linear',
-    wx, wy,
-    vx: Math.cos(angle) * speed,
-    vy: Math.sin(angle) * speed,
-    angle,
-    w: PROJECTILE_W,
-    h: PROJECTILE_H,
-  };
+  return { wx, wy, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, angle, w: PROJECTILE_W, h: PROJECTILE_H };
 }
 
-// Spawn AoE near player in world space
 function spawnAoE(tx, ty) {
-  const angle = Math.random() * Math.PI * 2;
-  const r = 80 + Math.random() * 200;
+  const a = Math.random() * Math.PI * 2, r = 80 + Math.random() * 220;
   return {
-    type: 'aoe',
-    wx: clamp(tx + Math.cos(angle) * r, AOE_RADIUS, WORLD_W - AOE_RADIUS),
-    wy: clamp(ty + Math.sin(angle) * r, AOE_RADIUS, WORLD_H - AOE_RADIUS),
-    radius: AOE_RADIUS,
-    born: performance.now(),
-    exploded: false,
-    explodeTime: AOE_DELAY,
-    showExplosion: false,
-    explosionLife: 0,
+    wx: clamp(tx + Math.cos(a) * r, AOE_RADIUS, WORLD_W - AOE_RADIUS),
+    wy: clamp(ty + Math.sin(a) * r, AOE_RADIUS, WORLD_H - AOE_RADIUS),
+    radius: AOE_RADIUS, born: performance.now(), exploded: false,
+    explodeTime: AOE_DELAY, showExplosion: false, explosionLife: 0,
   };
 }
 
-// ─── Isometric drawing helpers ────────────────────────────────────────────────
-
-// Draw an iso ellipse (circle projected onto iso plane)
-function isoCircle(ctx, wx, wy, r) {
-  const { sx, sy } = worldToScreen(wx, wy);
-  ctx.save();
-  ctx.translate(sx, sy);
-  ctx.scale(1, ISO_SCALE_Y / ISO_SCALE_X * 0.6); // flatten to look like ground
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.restore();
+// ─── Iso drawing helpers ──────────────────────────────────────────────────────
+function isoStroke(ctx, proj, wx, wy, r, color, lw) {
+  const { sx, sy } = proj.worldToScreen(wx, wy);
+  const rx = r * proj.scale, ry = rx * (proj.sinA / proj.cosA);
+  ctx.strokeStyle = color; ctx.lineWidth = lw;
+  ctx.beginPath(); ctx.ellipse(sx, sy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2); ctx.stroke();
 }
 
-// Draw iso flat ring (stroke only)
-function isoCircleStroke(ctx, wx, wy, r, color, lw) {
-  const { sx, sy } = worldToScreen(wx, wy);
-  ctx.save();
-  ctx.translate(sx, sy);
-  ctx.scale(1, 0.35);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = lw;
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-}
-
-// Draw iso partial arc (for progress indicators)
-function isoArcStroke(ctx, wx, wy, r, startAngle, endAngle, color, lw) {
-  const { sx, sy } = worldToScreen(wx, wy);
-  ctx.save();
-  ctx.translate(sx, sy);
-  ctx.scale(1, 0.35);
-  ctx.strokeStyle = color;
-  ctx.lineWidth = lw;
-  ctx.beginPath();
-  ctx.arc(0, 0, r, startAngle, endAngle);
-  ctx.stroke();
-  ctx.restore();
-}
-
-// Draw iso filled ellipse
-function isoCircleFill(ctx, wx, wy, r, color) {
-  const { sx, sy } = worldToScreen(wx, wy);
-  ctx.save();
-  ctx.translate(sx, sy);
-  ctx.scale(1, 0.35);
+function isoFill(ctx, proj, wx, wy, r, color) {
+  const { sx, sy } = proj.worldToScreen(wx, wy);
+  const rx = r * proj.scale, ry = rx * (proj.sinA / proj.cosA);
   ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.beginPath(); ctx.ellipse(sx, sy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2); ctx.fill();
+}
+
+function isoArc(ctx, proj, wx, wy, r, start, end, color, lw) {
+  const { sx, sy } = proj.worldToScreen(wx, wy);
+  const rx = r * proj.scale, ry = rx * (proj.sinA / proj.cosA);
+  ctx.save(); ctx.translate(sx, sy); ctx.scale(1, ry / Math.max(rx, 0.01));
+  ctx.strokeStyle = color; ctx.lineWidth = lw;
+  ctx.beginPath(); ctx.arc(0, 0, Math.max(rx, 1), start, end); ctx.stroke();
   ctx.restore();
 }
 
-// ─── Main Component ────────────────────────────────────────────────────────────
+// ─── Component ────────────────────────────────────────────────────────────────
 export default function DodgeGame() {
   const canvasRef = useRef(null);
+  const projRef = useRef(makeProjection(1200, 800));
+  const [gamePhase, setGamePhase] = useState('menu');
+  const [difficulty, setDifficulty] = useState('normal');
+  const phaseRef = useRef('menu');
+  const diffRef = useRef('normal');
 
-  // All mutable game state in a single ref (avoids stale closures in rAF)
+  useEffect(() => { phaseRef.current = gamePhase; }, [gamePhase]);
+  useEffect(() => { diffRef.current = difficulty; }, [difficulty]);
+
   const stateRef = useRef({
     player: { wx: WORLD_W / 2, wy: WORLD_H / 2 },
-    playerTarget: null,
-    playerHP: 100,
-
-    flashCooldownLeft: 0,
-    mouseWx: WORLD_W / 2,
-    mouseWy: WORLD_H / 2,
-
-    projectiles: [],
-    aoes: [],
-    ripples: [],
-
-    alive: false,
-    started: false,
-    score: 0,
-    highScore: 0,
-    lastTime: 0,
-    elapsed: 0,
-
-    nextSpawn: 0,
-    spawnInterval: BASE_SPAWN_INTERVAL,
-    projectileSpeed: BASE_PROJECTILE_SPEED,
-    nextAoe: 0,
-    aoeInterval: 4000,
-    nextEscalation: ESCALATION_INTERVAL,
+    playerTarget: null, playerHP: 100,
+    flashCooldownLeft: 0, mouseWx: WORLD_W / 2, mouseWy: WORLD_H / 2,
+    projectiles: [], aoes: [], ripples: [], particles: [],
+    score: 0, highScore: 0, lastTime: 0, elapsed: 0,
+    nextSpawn: 0, spawnInterval: 0, projectileSpeed: 0,
+    nextAoe: 0, aoeInterval: 0, nextEscalation: 0,
+    diff: DIFFICULTIES.normal, cw: 1200, ch: 800,
   });
-
   const rafRef = useRef(null);
 
-  // ── Drawing ──────────────────────────────────────────────────────────────────
-  const draw = useCallback((ctx, state, now) => {
-    const { player, projectiles, aoes, ripples, flashCooldownLeft, alive, started } = state;
+  // ── Resize ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const onResize = () => {
+      const c = canvasRef.current; if (!c) return;
+      const w = window.innerWidth, h = window.innerHeight;
+      c.width = w; c.height = h;
+      projRef.current = makeProjection(w, h);
+      stateRef.current.cw = w; stateRef.current.ch = h;
+    };
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
-    // ── Background ──────────────────────────────────────────────────────────
-    ctx.fillStyle = '#0d0d1a';
-    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  // ── Draw helper: game entities ─────────────────────────────────────────────
+  const drawEntities = useCallback((ctx, state, now, proj, CW) => {
+    const { player, projectiles, aoes, ripples, particles, flashCooldownLeft } = state;
 
-    // ── Isometric grid ──────────────────────────────────────────────────────
-    const tiles = Math.ceil(WORLD_W / ISO_TILE);
-    ctx.strokeStyle = 'rgba(100,120,200,0.12)';
-    ctx.lineWidth = 1;
-    for (let gx = 0; gx <= tiles; gx++) {
-      const wx = gx * ISO_TILE;
-      const { sx: sx0, sy: sy0 } = worldToScreen(wx, 0);
-      const { sx: sx1, sy: sy1 } = worldToScreen(wx, WORLD_H);
-      ctx.beginPath();
-      ctx.moveTo(sx0, sy0);
-      ctx.lineTo(sx1, sy1);
-      ctx.stroke();
-    }
-    for (let gy = 0; gy <= tiles; gy++) {
-      const wy = gy * ISO_TILE;
-      const { sx: sx0, sy: sy0 } = worldToScreen(0, wy);
-      const { sx: sx1, sy: sy1 } = worldToScreen(WORLD_W, wy);
-      ctx.beginPath();
-      ctx.moveTo(sx0, sy0);
-      ctx.lineTo(sx1, sy1);
-      ctx.stroke();
-    }
-
-    // ── Arena border diamond ────────────────────────────────────────────────
-    const corners = [
-      worldToScreen(0, 0),
-      worldToScreen(WORLD_W, 0),
-      worldToScreen(WORLD_W, WORLD_H),
-      worldToScreen(0, WORLD_H),
-    ];
-    ctx.strokeStyle = 'rgba(100,160,255,0.25)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(corners[0].sx, corners[0].sy);
-    for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].sx, corners[i].sy);
-    ctx.closePath();
-    ctx.stroke();
-
-    if (!started) {
-      ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      ctx.fillStyle = '#cddaff';
-      ctx.font = 'bold 44px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('DODGE GAME', CANVAS_W / 2, CANVAS_H / 2 - 60);
-      ctx.font = '20px Arial';
-      ctx.fillStyle = '#8899bb';
-      ctx.fillText('Right-click to move · D/F to Flash', CANVAS_W / 2, CANVAS_H / 2 - 8);
-      ctx.fillText('Avoid all incoming skillshots', CANVAS_W / 2, CANVAS_H / 2 + 22);
-      ctx.fillStyle = '#4fc3f7';
-      ctx.font = 'bold 22px Arial';
-      ctx.fillText('Right-click anywhere to START', CANVAS_W / 2, CANVAS_H / 2 + 72);
-      ctx.textAlign = 'left';
-      return;
-    }
-
-    if (!alive) {
-      ctx.fillStyle = 'rgba(0,0,0,0.65)';
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      ctx.fillStyle = '#ff5252';
-      ctx.font = 'bold 50px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('GAME OVER', CANVAS_W / 2, CANVAS_H / 2 - 60);
-      ctx.fillStyle = '#cddaff';
-      ctx.font = '24px Arial';
-      ctx.fillText(`Score: ${state.score.toFixed(1)}s`, CANVAS_W / 2, CANVAS_H / 2);
-      ctx.fillText(`Best: ${state.highScore.toFixed(1)}s`, CANVAS_W / 2, CANVAS_H / 2 + 36);
-      ctx.fillStyle = '#4fc3f7';
-      ctx.font = 'bold 20px Arial';
-      ctx.fillText('Right-click to play again', CANVAS_W / 2, CANVAS_H / 2 + 92);
-      ctx.textAlign = 'left';
-      return;
-    }
-
-    // ── Ripples (move indicators) ───────────────────────────────────────────
+    // Ripples
     for (const rip of ripples) {
-      const age = (now - rip.born) / rip.life;
-      if (age >= 1) continue;
-      const r = rip.maxR * age;
-      const alpha = 0.55 * (1 - age);
-      isoCircleStroke(ctx, rip.wx, rip.wy, r, `rgba(79,195,247,${alpha.toFixed(3)})`, 2);
+      const age = (now - rip.born) / rip.life; if (age >= 1) continue;
+      isoStroke(ctx, proj, rip.wx, rip.wy, rip.maxR * age, `rgba(79,195,247,${(0.5 * (1 - age)).toFixed(3)})`, 2);
     }
 
-    // ── AoE indicators ──────────────────────────────────────────────────────
+    // AoE
     for (const aoe of aoes) {
-      const ageMs = now - aoe.born;
-      const progress = Math.min(ageMs / aoe.explodeTime, 1);
-
+      const ageMs = now - aoe.born, progress = Math.min(ageMs / aoe.explodeTime, 1);
       if (aoe.showExplosion) {
-        const eAge = aoe.explosionLife;
-        const alpha = Math.max(0, 1 - eAge / 320).toFixed(3);
-        isoCircleFill(ctx, aoe.wx, aoe.wy, aoe.radius * (1 + eAge / 160), `rgba(255,100,0,${alpha})`);
-        isoCircleStroke(ctx, aoe.wx, aoe.wy, aoe.radius * (1.2 + eAge / 120), `rgba(255,200,0,${alpha})`, 3);
+        const e = aoe.explosionLife, a = Math.max(0, 1 - e / 350).toFixed(3);
+        isoFill(ctx, proj, aoe.wx, aoe.wy, aoe.radius * (1 + e / 140), `rgba(255,90,0,${a})`);
+        isoStroke(ctx, proj, aoe.wx, aoe.wy, aoe.radius * (1.3 + e / 100), `rgba(255,200,50,${(a * 0.7).toFixed(3)})`, 3);
       } else {
-        // Ground shadow / fill
-        isoCircleFill(ctx, aoe.wx, aoe.wy, aoe.radius, `rgba(255,60,60,${(0.06 + 0.10 * progress).toFixed(3)})`);
-        // Outer ring
-        isoCircleStroke(ctx, aoe.wx, aoe.wy, aoe.radius, `rgba(255,80,80,${(0.35 + 0.45 * progress).toFixed(3)})`, 3);
-        // Progress arc
-        isoArcStroke(ctx, aoe.wx, aoe.wy, aoe.radius - 7,
-          -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress,
-          'rgba(255,40,40,0.95)', 4);
+        isoFill(ctx, proj, aoe.wx, aoe.wy, aoe.radius, `rgba(255,50,50,${(0.05 + 0.12 * progress).toFixed(3)})`);
+        isoStroke(ctx, proj, aoe.wx, aoe.wy, aoe.radius, `rgba(255,70,70,${(0.3 + 0.5 * progress).toFixed(3)})`, 2.5);
+        isoArc(ctx, proj, aoe.wx, aoe.wy, aoe.radius - 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress, 'rgba(255,30,30,0.95)', 3.5);
       }
     }
 
-    // ── Linear projectiles ──────────────────────────────────────────────────
-    for (const proj of projectiles) {
-      const { sx, sy } = worldToScreen(proj.wx, proj.wy);
-      // The iso projection distorts the movement direction visually.
-      // We compute the screen-space angle from velocity projected to screen.
-      const { sx: sx2, sy: sy2 } = worldToScreen(proj.wx + proj.vx * 0.05, proj.wy + proj.vy * 0.05);
-      const screenAngle = Math.atan2(sy2 - sy, sx2 - sx);
-
-      ctx.save();
-      ctx.translate(sx, sy);
-      ctx.rotate(screenAngle - Math.PI / 2);
-      // Flatten on y axis to mimic iso
-      ctx.scale(1, 0.55);
-
-      const H = proj.h;
-      const W = proj.w;
-      const grad = ctx.createLinearGradient(0, -H / 2, 0, H / 2);
-      grad.addColorStop(0,   'rgba(255,70,70,0.95)');
-      grad.addColorStop(0.45,'rgba(255,140,30,1)');
-      grad.addColorStop(1,   'rgba(255,70,70,0.25)');
-      ctx.fillStyle = grad;
-      ctx.shadowColor = 'rgba(255,100,0,0.9)';
-      ctx.shadowBlur = 12;
-      ctx.beginPath();
-      ctx.roundRect(-W / 2, -H / 2, W, H, 5);
-      ctx.fill();
+    // Projectiles
+    for (const p of projectiles) {
+      const { sx, sy } = proj.worldToScreen(p.wx, p.wy);
+      const { sx: sx2, sy: sy2 } = proj.worldToScreen(p.wx + p.vx * 0.04, p.wy + p.vy * 0.04);
+      const sa = Math.atan2(sy2 - sy, sx2 - sx);
+      ctx.save(); ctx.translate(sx, sy); ctx.rotate(sa - Math.PI / 2); ctx.scale(1, 0.5);
+      const grad = ctx.createLinearGradient(0, -p.h / 2, 0, p.h / 2);
+      grad.addColorStop(0, 'rgba(255,80,80,0.95)'); grad.addColorStop(0.4, 'rgba(255,150,40,1)'); grad.addColorStop(1, 'rgba(255,80,80,0.2)');
+      ctx.fillStyle = grad; ctx.shadowColor = 'rgba(255,100,0,0.8)'; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.roundRect(-p.w / 2, -p.h / 2, p.w, p.h, 4); ctx.fill();
       ctx.restore();
     }
 
-    // ── Player shadow ───────────────────────────────────────────────────────
-    isoCircleFill(ctx, player.wx, player.wy, PLAYER_RADIUS * 1.1, 'rgba(0,0,0,0.4)');
-
-    // ── Player body ─────────────────────────────────────────────────────────
-    const { sx: psx, sy: psy } = worldToScreen(player.wx, player.wy);
-
-    // Outer glow
-    const glow = ctx.createRadialGradient(psx, psy, 0, psx, psy, PLAYER_RADIUS * 2.2);
-    glow.addColorStop(0, 'rgba(79,195,247,0.30)');
-    glow.addColorStop(1, 'rgba(79,195,247,0)');
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(psx, psy, PLAYER_RADIUS * 2.2, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Isometric "cylinder" body — draw as an iso ellipse + vertical rect cap
-    const bodyRx = PLAYER_RADIUS;
-    const bodyRy = PLAYER_RADIUS * 0.38; // iso vertical compression
-    const bodyH  = PLAYER_RADIUS * 0.8;  // height of cylinder shaft
-
-    // Cylinder shaft (sides)
-    const bodyGradV = ctx.createLinearGradient(psx - bodyRx, psy, psx + bodyRx, psy);
-    bodyGradV.addColorStop(0, '#0277bd');
-    bodyGradV.addColorStop(0.4, '#81d4fa');
-    bodyGradV.addColorStop(1, '#0277bd');
-    ctx.fillStyle = bodyGradV;
-    ctx.beginPath();
-    ctx.ellipse(psx, psy + bodyH / 2, bodyRx, bodyRy, 0, 0, Math.PI); // bottom half-ellipse
-    ctx.lineTo(psx - bodyRx, psy - bodyH / 2);
-    ctx.ellipse(psx, psy - bodyH / 2, bodyRx, bodyRy, 0, Math.PI, 0); // top half-ellipse
-    ctx.closePath();
-    ctx.fill();
-
-    // Top cap
-    const topGrad = ctx.createRadialGradient(psx - 3, psy - bodyH / 2 - 1, 1, psx, psy - bodyH / 2, bodyRx);
-    topGrad.addColorStop(0, '#b3e5fc');
-    topGrad.addColorStop(1, '#0288d1');
-    ctx.fillStyle = topGrad;
-    ctx.shadowColor = '#4fc3f7';
-    ctx.shadowBlur = 14;
-    ctx.beginPath();
-    ctx.ellipse(psx, psy - bodyH / 2, bodyRx, bodyRy, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-
-    // ── HP bar ──────────────────────────────────────────────────────────────
-    const barW = 44;
-    const barH = 5;
-    const barX = psx - barW / 2;
-    const barY = psy - PLAYER_RADIUS - bodyH - 14;
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
-    ctx.fillStyle = '#222';
-    ctx.fillRect(barX, barY, barW, barH);
-    ctx.fillStyle = state.playerHP > 50 ? '#4caf50' : state.playerHP > 25 ? '#ff9800' : '#f44336';
-    ctx.fillRect(barX, barY, barW * (state.playerHP / 100), barH);
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(barX, barY, barW, barH);
-
-    // ── Flash cooldown ring ─────────────────────────────────────────────────
-    if (flashCooldownLeft > 0) {
-      const cdProg = 1 - flashCooldownLeft / FLASH_COOLDOWN;
-      ctx.strokeStyle = 'rgba(180,140,255,0.5)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(psx, psy, bodyRx + 5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * cdProg);
-      ctx.stroke();
-    } else {
-      ctx.strokeStyle = 'rgba(200,170,255,0.9)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(psx, psy, bodyRx + 5, 0, Math.PI * 2);
-      ctx.stroke();
+    // Particles
+    for (const pt of particles) {
+      const age = (now - pt.born) / pt.life; if (age >= 1) continue;
+      const { sx, sy } = proj.worldToScreen(pt.wx, pt.wy);
+      ctx.fillStyle = `rgba(${pt.color},${(1 - age).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(sx, sy, Math.max(pt.r * (1 - age * 0.5), 0.5), 0, Math.PI * 2); ctx.fill();
     }
 
-    // ── HUD panel ───────────────────────────────────────────────────────────
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.beginPath();
-    ctx.roundRect(8, 8, 190, 60, 6);
-    ctx.fill();
-    ctx.fillStyle = '#cddaff';
-    ctx.font = 'bold 15px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`Time: ${state.score.toFixed(1)}s`, 18, 30);
-    ctx.fillText(`Best: ${state.highScore.toFixed(1)}s`, 18, 52);
+    // Player shadow
+    isoFill(ctx, proj, player.wx, player.wy, PLAYER_RADIUS * 1.2, 'rgba(0,0,0,0.35)');
 
-    // Flash skill button
+    // Player body
+    const { sx: psx, sy: psy } = proj.worldToScreen(player.wx, player.wy);
+    const bRx = PLAYER_RADIUS * proj.scale * 0.55;
+    const bRy = bRx * (proj.sinA / proj.cosA);
+    const bH = PLAYER_RADIUS * proj.scale * 0.45;
+
+    // Glow
+    const glow = ctx.createRadialGradient(psx, psy, 0, psx, psy, bRx * 3);
+    glow.addColorStop(0, 'rgba(79,195,247,0.28)'); glow.addColorStop(1, 'rgba(79,195,247,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(psx, psy, bRx * 3, 0, Math.PI * 2); ctx.fill();
+
+    // Shaft
+    const sg = ctx.createLinearGradient(psx - bRx, psy, psx + bRx, psy);
+    sg.addColorStop(0, '#01579b'); sg.addColorStop(0.35, '#4fc3f7'); sg.addColorStop(0.65, '#81d4fa'); sg.addColorStop(1, '#01579b');
+    ctx.fillStyle = sg; ctx.beginPath();
+    ctx.ellipse(psx, psy + bH / 2, bRx, bRy, 0, 0, Math.PI);
+    ctx.lineTo(psx - bRx, psy - bH / 2);
+    ctx.ellipse(psx, psy - bH / 2, bRx, bRy, 0, Math.PI, 0);
+    ctx.closePath(); ctx.fill();
+
+    // Top cap
+    const tg = ctx.createRadialGradient(psx - bRx * 0.2, psy - bH / 2 - 1, 1, psx, psy - bH / 2, bRx);
+    tg.addColorStop(0, '#e1f5fe'); tg.addColorStop(1, '#0288d1');
+    ctx.fillStyle = tg; ctx.shadowColor = '#4fc3f7'; ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.ellipse(psx, psy - bH / 2, bRx, bRy, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // HP bar
+    const barW = bRx * 3.2, barH = 5, barX = psx - barW / 2, barY = psy - bH - bRy - 14;
+    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.roundRect(barX - 1, barY - 1, barW + 2, barH + 2, 2); ctx.fill();
+    ctx.fillStyle = state.playerHP > 50 ? '#4caf50' : state.playerHP > 25 ? '#ff9800' : '#f44336';
+    ctx.beginPath(); ctx.roundRect(barX, barY, Math.max(barW * (state.playerHP / 100), 0), barH, 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 0.5; ctx.strokeRect(barX, barY, barW, barH);
+
+    // Flash ring
+    const ringR = bRx + 6;
+    if (flashCooldownLeft > 0) {
+      const p2 = 1 - flashCooldownLeft / state.diff.flashCd;
+      ctx.strokeStyle = 'rgba(170,130,255,0.45)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(psx, psy, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p2); ctx.stroke();
+    } else {
+      ctx.strokeStyle = 'rgba(190,160,255,0.85)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(psx, psy, ringR, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    // HUD
+    const hudX = 80, hudY = 50;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.beginPath(); ctx.roundRect(hudX, hudY, 170, 60, 8); ctx.fill();
+    ctx.fillStyle = '#c8d6ff'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(`Time: ${state.score.toFixed(1)}s`, hudX + 12, hudY + 22);
+    ctx.fillText(`Best: ${state.highScore.toFixed(1)}s`, hudX + 12, hudY + 44);
+
+    // Flash HUD
     const flashReady = flashCooldownLeft <= 0;
-    ctx.fillStyle = flashReady ? 'rgba(140,100,255,0.9)' : 'rgba(40,40,60,0.9)';
-    ctx.beginPath();
-    ctx.roundRect(CANVAS_W - 84, 8, 76, 46, 6);
-    ctx.fill();
-    ctx.strokeStyle = flashReady ? 'rgba(200,170,255,0.8)' : 'rgba(80,80,100,0.5)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = flashReady ? '#fff' : '#666';
-    ctx.font = 'bold 13px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('[D / F]', CANVAS_W - 46, 27);
+    const fX = CW - 90, fY = 50;
+    ctx.fillStyle = flashReady ? 'rgba(100,70,220,0.85)' : 'rgba(30,30,50,0.85)';
+    ctx.beginPath(); ctx.roundRect(fX, fY, 76, 44, 8); ctx.fill();
+    if (flashReady) { ctx.strokeStyle = 'rgba(180,150,255,0.6)'; ctx.lineWidth = 1; ctx.stroke(); }
+    ctx.fillStyle = flashReady ? '#fff' : '#555'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('[D / F]', fX + 38, fY + 17);
     ctx.font = '11px monospace';
-    ctx.fillText(
-      flashReady ? 'FLASH ⚡' : `${Math.ceil(flashCooldownLeft * (FLASH_VISUAL_COOLDOWN / FLASH_COOLDOWN))}s`,
-      CANVAS_W - 46, 44
-    );
+    ctx.fillText(flashReady ? 'FLASH ⚡' : `${Math.ceil(flashCooldownLeft * (FLASH_VISUAL_COOLDOWN / state.diff.flashCd))}s`, fX + 38, fY + 35);
     ctx.textAlign = 'left';
   }, []);
+
+  // ── Main draw ──────────────────────────────────────────────────────────────
+  const draw = useCallback((ctx, state, now) => {
+    const { cw: CW, ch: CH } = state;
+    const proj = projRef.current;
+    const phase = phaseRef.current;
+
+    ctx.fillStyle = '#0a0a18'; ctx.fillRect(0, 0, CW, CH);
+
+    // Vignette
+    const vig = ctx.createRadialGradient(CW / 2, CH / 2, Math.min(CW, CH) * 0.2, CW / 2, CH / 2, Math.max(CW, CH) * 0.7);
+    vig.addColorStop(0, 'rgba(10,10,24,0)'); vig.addColorStop(1, 'rgba(0,0,0,0.45)');
+    ctx.fillStyle = vig; ctx.fillRect(0, 0, CW, CH);
+
+    // Grid
+    const tiles = Math.ceil(WORLD_W / ISO_TILE);
+    ctx.strokeStyle = 'rgba(80,100,180,0.10)'; ctx.lineWidth = 1;
+    for (let i = 0; i <= tiles; i++) {
+      const w = i * ISO_TILE;
+      let a = proj.worldToScreen(w, 0), b = proj.worldToScreen(w, WORLD_H);
+      ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+      a = proj.worldToScreen(0, w); b = proj.worldToScreen(WORLD_W, w);
+      ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+    }
+
+    // Border
+    const cn = [proj.worldToScreen(0, 0), proj.worldToScreen(WORLD_W, 0), proj.worldToScreen(WORLD_W, WORLD_H), proj.worldToScreen(0, WORLD_H)];
+    ctx.strokeStyle = 'rgba(80,140,255,0.30)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cn[0].sx, cn[0].sy);
+    for (let i = 1; i < 4; i++) ctx.lineTo(cn[i].sx, cn[i].sy);
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = 'rgba(30,40,80,0.06)'; ctx.fill();
+
+    if (phase === 'menu') {
+      drawEntities(ctx, state, now, proj, CW);
+      ctx.fillStyle = 'rgba(0,0,0,0.50)'; ctx.fillRect(0, 0, CW, CH);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#cddaff'; ctx.font = `bold ${Math.min(CW * 0.05, 52)}px Arial`;
+      ctx.fillText('DODGE GAME', CW / 2, CH / 2 - CH * 0.12);
+      ctx.font = `${Math.min(CW * 0.02, 18)}px Arial`; ctx.fillStyle = '#7788aa';
+      ctx.fillText('Right-click to move  ·  D / F to Flash  ·  ESC to menu', CW / 2, CH / 2 - CH * 0.06);
+      ctx.fillText('Dodge all incoming skillshots — survive as long as you can', CW / 2, CH / 2 - CH * 0.025);
+
+      // Difficulty badges
+      const diffs = Object.entries(DIFFICULTIES);
+      const bW = Math.min(110, CW * 0.1), gap = 14, total = diffs.length * bW + (diffs.length - 1) * gap;
+      const sx = CW / 2 - total / 2, by = CH / 2 + CH * 0.02;
+      ctx.font = `bold ${Math.min(15, CW * 0.016)}px Arial`;
+      for (let i = 0; i < diffs.length; i++) {
+        const [key, val] = diffs[i], bx = sx + i * (bW + gap), sel = key === diffRef.current;
+        ctx.fillStyle = sel ? 'rgba(80,140,255,0.85)' : 'rgba(40,50,70,0.8)';
+        ctx.beginPath(); ctx.roundRect(bx, by, bW, 36, 6); ctx.fill();
+        if (sel) { ctx.strokeStyle = 'rgba(120,180,255,0.9)'; ctx.lineWidth = 2; ctx.stroke(); }
+        ctx.fillStyle = sel ? '#fff' : '#8899bb'; ctx.textAlign = 'center';
+        ctx.fillText(val.label, bx + bW / 2, by + 23);
+      }
+      ctx.fillStyle = '#4fc3f7'; ctx.font = `bold ${Math.min(CW * 0.022, 22)}px Arial`;
+      ctx.fillText('Right-click anywhere to START', CW / 2, CH / 2 + CH * 0.11);
+      ctx.textAlign = 'left';
+      return;
+    }
+
+    if (phase === 'dead') {
+      drawEntities(ctx, state, now, proj, CW);
+      ctx.fillStyle = 'rgba(0,0,0,0.60)'; ctx.fillRect(0, 0, CW, CH);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff5252'; ctx.font = `bold ${Math.min(CW * 0.055, 54)}px Arial`;
+      ctx.fillText('GAME OVER', CW / 2, CH / 2 - CH * 0.10);
+      ctx.fillStyle = '#cddaff'; ctx.font = `${Math.min(CW * 0.028, 26)}px Arial`;
+      ctx.fillText(`Score: ${state.score.toFixed(1)}s`, CW / 2, CH / 2 - CH * 0.01);
+      ctx.fillText(`Best: ${state.highScore.toFixed(1)}s`, CW / 2, CH / 2 + CH * 0.04);
+      ctx.fillStyle = '#4fc3f7'; ctx.font = `bold ${Math.min(CW * 0.022, 22)}px Arial`;
+      ctx.fillText('Right-click or SPACE to play again', CW / 2, CH / 2 + CH * 0.11);
+      ctx.font = `${Math.min(CW * 0.016, 16)}px Arial`; ctx.fillStyle = '#7788aa';
+      ctx.fillText('ESC to return to menu', CW / 2, CH / 2 + CH * 0.15);
+      ctx.textAlign = 'left';
+      return;
+    }
+
+    drawEntities(ctx, state, now, proj, CW);
+  }, [drawEntities]);
 
   // ── Start / Restart ────────────────────────────────────────────────────────
   const startGame = useCallback(() => {
-    const state = stateRef.current;
-    state.player = { wx: WORLD_W / 2, wy: WORLD_H / 2 };
-    state.playerTarget = null;
-    state.playerHP = 100;
-    state.flashCooldownLeft = 0;
-    state.projectiles = [];
-    state.aoes = [];
-    state.ripples = [];
-    state.alive = true;
-    state.started = true;
-    state.score = 0;
-    state.elapsed = 0;
-    state.lastTime = performance.now();
-    state.nextSpawn = performance.now() + 1000;
-    state.nextAoe = performance.now() + 3000;
-    state.spawnInterval = BASE_SPAWN_INTERVAL;
-    state.projectileSpeed = BASE_PROJECTILE_SPEED;
-    state.aoeInterval = 4000;
-    state.nextEscalation = ESCALATION_INTERVAL;
+    const d = DIFFICULTIES[diffRef.current];
+    const s = stateRef.current;
+    s.diff = d;
+    s.player = { wx: WORLD_W / 2, wy: WORLD_H / 2 };
+    s.playerTarget = null; s.playerHP = 100; s.flashCooldownLeft = 0;
+    s.projectiles = []; s.aoes = []; s.ripples = []; s.particles = [];
+    s.score = 0; s.elapsed = 0;
+    s.lastTime = performance.now();
+    s.nextSpawn = performance.now() + 1200;
+    s.nextAoe = performance.now() + 3000;
+    s.spawnInterval = d.spawnInterval; s.projectileSpeed = d.projSpeed;
+    s.aoeInterval = d.aoeInterval; s.nextEscalation = d.escalationInterval;
+    setGamePhase('playing');
   }, []);
 
-  // ── Input handlers ─────────────────────────────────────────────────────────
+  const goToMenu = useCallback(() => { setGamePhase('menu'); }, []);
+
+  // ── Input ──────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
 
-    const getWorldCoords = (e) => {
+    const wc = (e) => {
       const rect = canvas.getBoundingClientRect();
-      const scaleX = CANVAS_W / rect.width;
-      const scaleY = CANVAS_H / rect.height;
-      const sx = (e.clientX - rect.left) * scaleX;
-      const sy = (e.clientY - rect.top) * scaleY;
-      const { wx, wy } = screenToWorld(sx, sy);
-      return {
-        wx: clamp(wx, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS),
-        wy: clamp(wy, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS),
-      };
+      const sx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const sy = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const { wx, wy } = projRef.current.screenToWorld(sx, sy);
+      return { wx: clamp(wx, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS), wy: clamp(wy, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS) };
     };
 
-    const handleContextMenu = (e) => {
+    const onClick = (e) => {
+      if (phaseRef.current !== 'menu') return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+      const CW = canvas.width, CH = canvas.height;
+      const diffs = Object.keys(DIFFICULTIES);
+      const bW = Math.min(110, CW * 0.1), gap = 14, total = diffs.length * bW + (diffs.length - 1) * gap;
+      const sx = CW / 2 - total / 2, by = CH / 2 + CH * 0.02;
+      for (let i = 0; i < diffs.length; i++) {
+        const bx = sx + i * (bW + gap);
+        if (mx >= bx && mx <= bx + bW && my >= by && my <= by + 36) { setDifficulty(diffs[i]); return; }
+      }
+    };
+
+    const onCtx = (e) => {
       e.preventDefault();
-      const { wx, wy } = getWorldCoords(e);
-      const state = stateRef.current;
-      if (!state.started || !state.alive) {
-        startGame();
-        return;
-      }
-      state.playerTarget = { wx, wy };
-      state.ripples.push({ wx, wy, born: performance.now(), life: 600, maxR: 30 });
+      const phase = phaseRef.current;
+      if (phase === 'menu' || phase === 'dead') { startGame(); return; }
+      const { wx, wy } = wc(e);
+      const s = stateRef.current;
+      s.playerTarget = { wx, wy };
+      s.ripples.push({ wx, wy, born: performance.now(), life: 600, maxR: 32 });
     };
 
-    const handleMouseMove = (e) => {
-      const { wx, wy } = getWorldCoords(e);
-      stateRef.current.mouseWx = wx;
-      stateRef.current.mouseWy = wy;
-    };
+    const onMove = (e) => { const { wx, wy } = wc(e); stateRef.current.mouseWx = wx; stateRef.current.mouseWy = wy; };
 
-    const handleKeyDown = (e) => {
-      const state = stateRef.current;
-      if (!state.alive) return;
-      if (e.key === 'd' || e.key === 'D' || e.key === 'f' || e.key === 'F') {
-        if (state.flashCooldownLeft > 0) return;
-        const dx = state.mouseWx - state.player.wx;
-        const dy = state.mouseWy - state.player.wy;
-        const d = Math.hypot(dx, dy);
-        const flashDist = Math.min(d, FLASH_RANGE);
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); goToMenu(); return; }
+      if (phaseRef.current === 'dead' && e.key === ' ') { e.preventDefault(); startGame(); return; }
+      if (phaseRef.current !== 'playing') return;
+      const s = stateRef.current;
+      if ((e.key === 'd' || e.key === 'D' || e.key === 'f' || e.key === 'F') && s.flashCooldownLeft <= 0) {
+        const dx = s.mouseWx - s.player.wx, dy = s.mouseWy - s.player.wy, d = Math.hypot(dx, dy);
         if (d > 0) {
-          state.player.wx = clamp(state.player.wx + (dx / d) * flashDist, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS);
-          state.player.wy = clamp(state.player.wy + (dy / d) * flashDist, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS);
+          const fd = Math.min(d, FLASH_RANGE);
+          s.player.wx = clamp(s.player.wx + (dx / d) * fd, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS);
+          s.player.wy = clamp(s.player.wy + (dy / d) * fd, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS);
         }
-        state.flashCooldownLeft = FLASH_COOLDOWN;
-        state.playerTarget = null;
+        s.flashCooldownLeft = s.diff.flashCd; s.playerTarget = null;
       }
     };
 
-    canvas.addEventListener('contextmenu', handleContextMenu);
-    canvas.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      canvas.removeEventListener('contextmenu', handleContextMenu);
-      canvas.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [startGame]);
+    canvas.addEventListener('click', onClick);
+    canvas.addEventListener('contextmenu', onCtx);
+    canvas.addEventListener('mousemove', onMove);
+    window.addEventListener('keydown', onKey);
+    return () => { canvas.removeEventListener('click', onClick); canvas.removeEventListener('contextmenu', onCtx); canvas.removeEventListener('mousemove', onMove); window.removeEventListener('keydown', onKey); };
+  }, [startGame, goToMenu]);
 
   // ── Game loop ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    const gameLoop = (now) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
+    const loop = (now) => {
+      const canvas = canvasRef.current; if (!canvas) return;
       const ctx = canvas.getContext('2d');
-      const state = stateRef.current;
+      const s = stateRef.current;
+      const dt = Math.min((now - s.lastTime) / 1000, 0.05);
+      s.lastTime = now;
 
-      const dt = Math.min((now - state.lastTime) / 1000, 0.05);
-      state.lastTime = now;
+      if (phaseRef.current === 'playing') {
+        s.elapsed += dt; s.score = s.elapsed;
+        if (s.score > s.highScore) s.highScore = s.score;
+        const d = s.diff;
 
-      if (state.alive) {
-        state.elapsed += dt;
-        state.score = state.elapsed;
-        if (state.score > state.highScore) state.highScore = state.score;
-
-        // Escalation
-        if (state.elapsed >= state.nextEscalation) {
-          state.nextEscalation += ESCALATION_INTERVAL;
-          state.projectileSpeed += SPEED_INCREMENT;
-          state.spawnInterval = Math.max(MIN_SPAWN_INTERVAL, state.spawnInterval - SPAWN_INTERVAL_DECREMENT);
-          state.aoeInterval = Math.max(2000, state.aoeInterval - 200);
+        if (s.elapsed >= s.nextEscalation) {
+          s.nextEscalation += d.escalationInterval;
+          s.projectileSpeed += d.speedInc;
+          s.spawnInterval = Math.max(d.minSpawn, s.spawnInterval - d.spawnDec);
+          s.aoeInterval = Math.max(1800, s.aoeInterval - 180);
         }
 
-        // Flash cooldown
-        if (state.flashCooldownLeft > 0) {
-          state.flashCooldownLeft = Math.max(0, state.flashCooldownLeft - dt);
+        if (s.flashCooldownLeft > 0) s.flashCooldownLeft = Math.max(0, s.flashCooldownLeft - dt);
+
+        if (s.playerTarget) {
+          const dx = s.playerTarget.wx - s.player.wx, dy = s.playerTarget.wy - s.player.wy, dd = Math.hypot(dx, dy), step = PLAYER_SPEED * dt;
+          if (dd < ARRIVAL_THRESHOLD || dd < step) { s.player.wx = s.playerTarget.wx; s.player.wy = s.playerTarget.wy; s.playerTarget = null; }
+          else { s.player.wx += (dx / dd) * step; s.player.wy += (dy / dd) * step; }
+          s.player.wx = clamp(s.player.wx, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS);
+          s.player.wy = clamp(s.player.wy, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS);
         }
 
-        // Player movement
-        if (state.playerTarget) {
-          const { wx: tx, wy: ty } = state.playerTarget;
-          const dx = tx - state.player.wx;
-          const dy = ty - state.player.wy;
-          const d = Math.hypot(dx, dy);
-          if (d < ARRIVAL_THRESHOLD) {
-            state.player.wx = tx;
-            state.player.wy = ty;
-            state.playerTarget = null;
-          } else {
-            const step = PLAYER_SPEED * dt;
-            if (d < step) {
-              state.player.wx = tx;
-              state.player.wy = ty;
-              state.playerTarget = null;
-            } else {
-              state.player.wx += (dx / d) * step;
-              state.player.wy += (dy / d) * step;
+        if (now >= s.nextSpawn) {
+          s.nextSpawn = now + s.spawnInterval + (Math.random() - 0.5) * 200;
+          const cnt = 1 + Math.floor(Math.random() * Math.min(3, 1 + s.elapsed / 25));
+          for (let i = 0; i < cnt; i++) s.projectiles.push(spawnProjectile(s.player.wx, s.player.wy, s.projectileSpeed));
+        }
+
+        if (now >= s.nextAoe) {
+          s.nextAoe = now + s.aoeInterval + (Math.random() - 0.5) * 800;
+          s.aoes.push(spawnAoE(s.player.wx, s.player.wy));
+        }
+
+        const margin = 150, projHitR = Math.max(PROJECTILE_W, PROJECTILE_H) * 0.3;
+        s.projectiles = s.projectiles.filter(p => {
+          p.wx += p.vx * dt; p.wy += p.vy * dt;
+          if (p.wx < -margin || p.wx > WORLD_W + margin || p.wy < -margin || p.wy > WORLD_H + margin) return false;
+          if (circleCircle(s.player.wx, s.player.wy, PLAYER_HITBOX_RADIUS, p.wx, p.wy, projHitR)) {
+            s.playerHP -= d.projDmg;
+            for (let k = 0; k < 6; k++) {
+              const a = Math.random() * Math.PI * 2, sp = 40 + Math.random() * 80;
+              s.particles.push({ wx: p.wx, wy: p.wy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, born: now, life: 350 + Math.random() * 200, r: 2 + Math.random() * 3, color: '255,120,40' });
             }
-          }
-          state.player.wx = clamp(state.player.wx, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS);
-          state.player.wy = clamp(state.player.wy, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS);
-        }
-
-        // Spawn linear projectiles
-        if (now >= state.nextSpawn) {
-          state.nextSpawn = now + state.spawnInterval + (Math.random() - 0.5) * 200;
-          const count = 1 + Math.floor(Math.random() * Math.min(3, 1 + state.elapsed / 20));
-          for (let i = 0; i < count; i++) {
-            state.projectiles.push(spawnProjectile(state.player.wx, state.player.wy, state.projectileSpeed));
-          }
-        }
-
-        // Spawn AoEs
-        if (now >= state.nextAoe) {
-          state.nextAoe = now + state.aoeInterval + (Math.random() - 0.5) * 800;
-          state.aoes.push(spawnAoE(state.player.wx, state.player.wy));
-        }
-
-        // Update & check projectile collisions
-        const margin = 120;
-        state.projectiles = state.projectiles.filter(proj => {
-          proj.wx += proj.vx * dt;
-          proj.wy += proj.vy * dt;
-          if (
-            proj.wx < -margin || proj.wx > WORLD_W + margin ||
-            proj.wy < -margin || proj.wy > WORLD_H + margin
-          ) return false;
-          // OBB collision: proj is an oriented rectangle in world space
-          if (circleOBB(
-            state.player.wx, state.player.wy, PLAYER_HITBOX_RADIUS,
-            proj.wx, proj.wy, proj.w / 2, proj.h / 2, proj.angle
-          )) {
-            state.playerHP -= 20;
-            if (state.playerHP <= 0) state.alive = false;
+            if (s.playerHP <= 0) { s.playerHP = 0; setGamePhase('dead'); }
             return false;
           }
           return true;
         });
 
-        // Update & check AoE collisions
-        state.aoes = state.aoes.filter(aoe => {
-          if (aoe.showExplosion) {
-            aoe.explosionLife += dt * 1000;
-            return aoe.explosionLife <= 380;
-          }
-          const ageMs = now - aoe.born;
-          if (!aoe.exploded && ageMs >= aoe.explodeTime) {
-            aoe.exploded = true;
-            aoe.showExplosion = true;
-            aoe.explosionLife = 0;
-            if (dist(state.player.wx, state.player.wy, aoe.wx, aoe.wy) < aoe.radius + PLAYER_HITBOX_RADIUS) {
-              state.playerHP -= 35;
-              if (state.playerHP <= 0) state.alive = false;
+        s.aoes = s.aoes.filter(aoe => {
+          if (aoe.showExplosion) { aoe.explosionLife += dt * 1000; return aoe.explosionLife <= 400; }
+          if (!aoe.exploded && now - aoe.born >= aoe.explodeTime) {
+            aoe.exploded = true; aoe.showExplosion = true; aoe.explosionLife = 0;
+            if (dist(s.player.wx, s.player.wy, aoe.wx, aoe.wy) < aoe.radius + PLAYER_HITBOX_RADIUS) {
+              s.playerHP -= d.aoeDmg;
+              for (let k = 0; k < 10; k++) {
+                const a = Math.random() * Math.PI * 2, sp = 50 + Math.random() * 100;
+                s.particles.push({ wx: aoe.wx + Math.cos(a) * 20, wy: aoe.wy + Math.sin(a) * 20, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, born: now, life: 400 + Math.random() * 250, r: 3 + Math.random() * 4, color: '255,80,30' });
+              }
+              if (s.playerHP <= 0) { s.playerHP = 0; setGamePhase('dead'); }
             }
           }
           return true;
         });
 
-        // Clean up expired ripples
-        state.ripples = state.ripples.filter(r => now - r.born < r.life);
+        s.particles = s.particles.filter(pt => { pt.wx += pt.vx * dt; pt.wy += pt.vy * dt; pt.vx *= 0.96; pt.vy *= 0.96; return now - pt.born < pt.life; });
+        s.ripples = s.ripples.filter(r => now - r.born < r.life);
       }
 
-      draw(ctx, state, now);
-      rafRef.current = requestAnimationFrame(gameLoop);
+      draw(ctx, s, now);
+      rafRef.current = requestAnimationFrame(loop);
     };
-
     stateRef.current.lastTime = performance.now();
-    rafRef.current = requestAnimationFrame(gameLoop);
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
+    rafRef.current = requestAnimationFrame(loop);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
   }, [draw]);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-950 select-none">
-      <div className="mb-3 text-center">
-        <h1 className="text-3xl font-bold text-blue-300 tracking-wider">
-          ⚡ DodgeLoL
-        </h1>
-        <p className="text-gray-400 text-sm mt-1">
-          Right-click to move · <kbd className="bg-gray-700 text-gray-200 px-1 rounded">D</kbd>/<kbd className="bg-gray-700 text-gray-200 px-1 rounded">F</kbd> to Flash
-        </p>
-      </div>
-
-      <canvas
-        ref={canvasRef}
-        width={CANVAS_W}
-        height={CANVAS_H}
-        className="border-2 border-blue-900 rounded-lg cursor-crosshair"
-        style={{ maxWidth: '100%', maxHeight: '82vh', objectFit: 'contain' }}
-      />
-
-      <div className="mt-3 text-gray-500 text-xs text-center max-w-lg">
-        Dodge all incoming skillshots · Difficulty escalates every 10 seconds · Flash (D/F) has a 15s cooldown
-      </div>
+    <div className="fixed inset-0 overflow-hidden bg-black">
+      <a
+        href="https://mario-belmonte.com/games"
+        className="fixed top-3 left-3 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-lg
+                   bg-gray-900/80 hover:bg-gray-800/90 border border-gray-700/50
+                   text-gray-300 hover:text-white text-sm font-medium
+                   transition-colors duration-150 backdrop-blur-sm no-underline"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+        Back to Games
+      </a>
+      <canvas ref={canvasRef} className="block w-full h-full cursor-crosshair" />
     </div>
   );
 }
