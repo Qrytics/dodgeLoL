@@ -28,6 +28,16 @@ const PROJECTILE_NEAR_RADIUS = 72;
 const AOE_RADIUS = 55;
 const AOE_DELAY = 1500;
 
+const LUX_WARNING_MS = 950;
+const LUX_ACTIVE_MS = 260;
+const LUX_BEAM_HALF_W = 42;
+
+const ROCKET_WARNING_MS = 780;
+const ROCKET_RADIUS = 22;
+const ROCKET_BASE_SPEED = 520;
+
+const WARNING_BLINK_MS = 140;
+
 const ISO_TILE = 60;
 const ARRIVAL_THRESHOLD = 4;
 
@@ -129,29 +139,27 @@ export default function DodgeGame() {
   useEffect(() => { phaseRef.current = gamePhase; }, [gamePhase]);
   useEffect(() => { diffRef.current = difficulty; }, [difficulty]);
 
-  useEffect(() => {
-    if (gamePhase === 'playing') setBgmMode('game');
-    if (gamePhase === 'menu' || gamePhase === 'dead') setBgmMode('menu');
-  }, [gamePhase, setBgmMode]);
-
-  useEffect(() => () => {
-    stopBgm();
-    const bag = audioRef.current;
-    if (bag.ctx && bag.ctx.state !== 'closed') bag.ctx.close();
-  }, [stopBgm]);
-
   const stateRef = useRef({
     player: { wx: WORLD_W / 2, wy: WORLD_H / 2 },
     playerTarget: null, playerHP: 100,
     flashCooldownLeft: 0, mouseWx: WORLD_W / 2, mouseWy: WORLD_H / 2,
-    projectiles: [], aoes: [], ripples: [], particles: [],
+    projectiles: [], aoes: [], luxBeams: [], rockets: [], warnings: [], ripples: [], particles: [],
     score: 0, highScore: 0, lastTime: 0, elapsed: 0,
     nextSpawn: 0, spawnInterval: 0, projectileSpeed: 0,
-    nextAoe: 0, aoeInterval: 0, nextEscalation: 0,
+    nextAoe: 0, aoeInterval: 0, nextLux: 0, luxInterval: 0,
+    nextRocket: 0, rocketInterval: 0, nextEscalation: 0,
     diff: DIFFICULTIES.normal, cw: 1200, ch: 800,
   });
   const rafRef = useRef(null);
-  const audioRef = useRef({ ctx: null, master: null, noise: null, bgmStop: null, lastNearSfxAt: 0, bgmMode: null });
+  const audioRef = useRef({
+    ctx: null,
+    master: null,
+    noise: null,
+    bgmStop: null,
+    lastNearSfxAt: 0,
+    lastWarnSfxAt: 0,
+    bgmMode: null,
+  });
 
   const ensureAudio = useCallback(() => {
     const bag = audioRef.current;
@@ -253,6 +261,31 @@ export default function DodgeGame() {
     playTone(bag.ctx, { freq: 760, toFreq: 1400, type: 'sine', gain: 0.05, duration: 0.08, release: 0.08, when: t + 0.01 });
   }, [ensureAudio, playTone]);
 
+  const playWarningSfx = useCallback((nowMs) => {
+    const bag = ensureAudio();
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
+    if (nowMs - bag.lastWarnSfxAt < 110) return;
+    bag.lastWarnSfxAt = nowMs;
+    const t = bag.ctx.currentTime + 0.001;
+    playTone(bag.ctx, { freq: 1180, toFreq: 980, type: 'square', gain: 0.03, duration: 0.04, release: 0.06, when: t });
+  }, [ensureAudio, playTone]);
+
+  const playLuxSfx = useCallback(() => {
+    const bag = ensureAudio();
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
+    const t = bag.ctx.currentTime + 0.001;
+    playTone(bag.ctx, { freq: 260, toFreq: 1850, type: 'sawtooth', gain: 0.07, duration: 0.2, release: 0.18, when: t });
+    playTone(bag.ctx, { freq: 980, toFreq: 2450, type: 'triangle', gain: 0.04, duration: 0.16, release: 0.12, when: t + 0.01 });
+  }, [ensureAudio, playTone]);
+
+  const playRocketSfx = useCallback(() => {
+    const bag = ensureAudio();
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
+    const t = bag.ctx.currentTime + 0.001;
+    playTone(bag.ctx, { freq: 110, toFreq: 85, type: 'sawtooth', gain: 0.08, duration: 0.18, release: 0.18, when: t });
+    playNoise(bag.ctx, { gain: 0.04, duration: 0.14, when: t + 0.01 });
+  }, [ensureAudio, playNoise, playTone]);
+
   const setBgmMode = useCallback((mode) => {
     const bag = ensureAudio();
     if (!bag?.ctx || bag.ctx.state !== 'running') return;
@@ -283,6 +316,17 @@ export default function DodgeGame() {
     bag.bgmStop = () => window.clearInterval(id);
   }, [ensureAudio, playTone, stopBgm]);
 
+  useEffect(() => {
+    if (gamePhase === 'playing') setBgmMode('game');
+    if (gamePhase === 'menu' || gamePhase === 'dead') setBgmMode('menu');
+  }, [gamePhase, setBgmMode]);
+
+  useEffect(() => () => {
+    stopBgm();
+    const bag = audioRef.current;
+    if (bag.ctx && bag.ctx.state !== 'closed') bag.ctx.close();
+  }, [stopBgm]);
+
   // ── Resize ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     const onResize = () => {
@@ -299,7 +343,7 @@ export default function DodgeGame() {
 
   // ── Draw helper: game entities ─────────────────────────────────────────────
   const drawEntities = useCallback((ctx, state, now, proj, CW) => {
-    const { player, projectiles, aoes, ripples, particles, flashCooldownLeft } = state;
+    const { player, projectiles, aoes, luxBeams, rockets, warnings, ripples, particles, flashCooldownLeft, ch: CH } = state;
 
     // Ripples
     for (const rip of ripples) {
@@ -319,6 +363,65 @@ export default function DodgeGame() {
         isoStroke(ctx, proj, aoe.wx, aoe.wy, aoe.radius, `rgba(255,70,70,${(0.3 + 0.5 * progress).toFixed(3)})`, 2.5);
         isoArc(ctx, proj, aoe.wx, aoe.wy, aoe.radius - 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress, 'rgba(255,30,30,0.95)', 3.5);
       }
+    }
+
+    // Lux beams
+    for (const beam of luxBeams) {
+      const isWarning = now < beam.warnUntil;
+      const isActive = now >= beam.warnUntil && now <= beam.fireUntil;
+      if (!isWarning && !isActive) continue;
+
+      const pulse = ((now - beam.born) % WARNING_BLINK_MS) / WARNING_BLINK_MS;
+      const a = isWarning ? (pulse < 0.5 ? 0.85 : 0.22) : 1;
+      const sw = beam.vertical
+        ? [proj.worldToScreen(beam.linePos, 0), proj.worldToScreen(beam.linePos, WORLD_H)]
+        : [proj.worldToScreen(0, beam.linePos), proj.worldToScreen(WORLD_W, beam.linePos)];
+
+      if (isWarning) {
+        ctx.strokeStyle = `rgba(255, 80, 80, ${a.toFixed(3)})`;
+        ctx.shadowColor = 'rgba(255, 80, 80, 0.25)';
+        ctx.shadowBlur = 8;
+        ctx.lineWidth = Math.max(3, LUX_BEAM_HALF_W * proj.scale * 0.45);
+      } else {
+        ctx.strokeStyle = `rgba(180, 245, 255, ${a.toFixed(3)})`;
+        ctx.shadowColor = 'rgba(90, 230, 255, 0.9)';
+        ctx.shadowBlur = 24;
+        ctx.lineWidth = Math.max(8, LUX_BEAM_HALF_W * proj.scale * 0.95);
+      }
+      ctx.beginPath();
+      ctx.moveTo(sw[0].sx, sw[0].sy);
+      ctx.lineTo(sw[1].sx, sw[1].sy);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // Rockets
+    for (const rk of rockets) {
+      if (now < rk.warnUntil) continue;
+      const { sx, sy } = proj.worldToScreen(rk.wx, rk.wy);
+      const { sx: sx2, sy: sy2 } = proj.worldToScreen(rk.wx + rk.vx * 0.06, rk.wy + rk.vy * 0.06);
+      const sa = Math.atan2(sy2 - sy, sx2 - sx);
+      const bodyL = rk.r * 2.8;
+      const bodyW = rk.r * 1.5;
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(sa);
+      ctx.scale(1, 0.65);
+      const rg = ctx.createLinearGradient(-bodyL / 2, 0, bodyL / 2, 0);
+      rg.addColorStop(0, 'rgba(255, 145, 90, 0.95)');
+      rg.addColorStop(0.55, 'rgba(255, 214, 95, 1)');
+      rg.addColorStop(1, 'rgba(255, 75, 55, 0.95)');
+      ctx.fillStyle = rg;
+      ctx.shadowColor = 'rgba(255, 120, 80, 0.9)';
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.roundRect(-bodyL / 2, -bodyW / 2, bodyL, bodyW, bodyW / 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.beginPath();
+      ctx.arc(bodyL / 2 - 4, 0, bodyW * 0.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
 
     // Projectiles
@@ -419,6 +522,38 @@ export default function DodgeGame() {
     ctx.font = '11px monospace';
     ctx.fillText(flashReady ? 'FLASH ⚡' : `${Math.ceil(flashCooldownLeft * (FLASH_VISUAL_COOLDOWN / state.diff.flashCd))}s`, fX + 38, fY + 35);
     ctx.textAlign = 'left';
+
+    // Directional warnings
+    for (const w of warnings) {
+      const age = now - w.born;
+      if (age > w.life) continue;
+      const pulse = (age % WARNING_BLINK_MS) / WARNING_BLINK_MS;
+      const alpha = pulse < 0.5 ? 0.95 : 0.2;
+      const color = w.type === 'lux' ? `rgba(255, 110, 110, ${alpha.toFixed(3)})` : `rgba(255, 190, 110, ${alpha.toFixed(3)})`;
+      const size = w.type === 'lux' ? 28 : 24;
+      const pad = 24;
+      let cx = CW / 2;
+      let cy = CH / 2;
+      if (w.side === 'top') cy = pad;
+      if (w.side === 'right') cx = CW - pad;
+      if (w.side === 'bottom') cy = CH - pad;
+      if (w.side === 'left') cx = pad;
+      const angle = w.side === 'top' ? Math.PI : w.side === 'right' ? -Math.PI / 2 : w.side === 'bottom' ? 0 : Math.PI / 2;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.moveTo(0, size * 0.8);
+      ctx.lineTo(-size * 0.5, -size * 0.6);
+      ctx.lineTo(size * 0.5, -size * 0.6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
   }, []);
 
   // ── Main draw ──────────────────────────────────────────────────────────────
@@ -509,12 +644,16 @@ export default function DodgeGame() {
     s.diff = d;
     s.player = { wx: WORLD_W / 2, wy: WORLD_H / 2 };
     s.playerTarget = null; s.playerHP = 100; s.flashCooldownLeft = 0;
-    s.projectiles = []; s.aoes = []; s.ripples = []; s.particles = [];
+    s.projectiles = []; s.aoes = []; s.luxBeams = []; s.rockets = []; s.warnings = []; s.ripples = []; s.particles = [];
     s.score = 0; s.elapsed = 0;
     s.lastTime = performance.now();
     s.nextSpawn = performance.now() + 1200;
     s.nextAoe = performance.now() + 3000;
+    s.nextLux = performance.now() + 5200;
+    s.nextRocket = performance.now() + 4300;
     s.spawnInterval = d.spawnInterval; s.projectileSpeed = d.projSpeed;
+    s.luxInterval = 12800;
+    s.rocketInterval = 7600;
     s.aoeInterval = d.aoeInterval; s.nextEscalation = d.escalationInterval;
     setGamePhase('playing');
   }, []);
@@ -612,6 +751,8 @@ export default function DodgeGame() {
           s.projectileSpeed += d.speedInc;
           s.spawnInterval = Math.max(d.minSpawn, s.spawnInterval - d.spawnDec);
           s.aoeInterval = Math.max(1800, s.aoeInterval - 180);
+          s.luxInterval = Math.max(7600, s.luxInterval - 220);
+          s.rocketInterval = Math.max(4300, s.rocketInterval - 150);
         }
 
         if (s.flashCooldownLeft > 0) s.flashCooldownLeft = Math.max(0, s.flashCooldownLeft - dt);
@@ -634,6 +775,70 @@ export default function DodgeGame() {
           s.nextAoe = now + s.aoeInterval + (Math.random() - 0.5) * 800;
           s.aoes.push(spawnAoE(s.player.wx, s.player.wy));
         }
+
+        if (now >= s.nextLux) {
+          s.nextLux = now + s.luxInterval + (Math.random() - 0.5) * 900;
+          const beam = spawnLuxBeam(now);
+          s.luxBeams.push(beam);
+          s.warnings.push({ type: 'lux', side: beam.side, born: now, life: LUX_WARNING_MS });
+          playWarningSfx(now);
+        }
+
+        if (now >= s.nextRocket) {
+          s.nextRocket = now + s.rocketInterval + (Math.random() - 0.5) * 800;
+          const rocketSpeed = Math.max(ROCKET_BASE_SPEED, s.projectileSpeed * 1.65);
+          const rocket = spawnRocket(now, rocketSpeed);
+          s.rockets.push(rocket);
+          s.warnings.push({ type: 'rocket', side: rocket.side, born: now, life: ROCKET_WARNING_MS });
+          playWarningSfx(now);
+        }
+
+        s.luxBeams = s.luxBeams.filter((beam) => {
+          if (now > beam.fireUntil) return false;
+          if (now >= beam.warnUntil && !beam.firedSfx) {
+            beam.firedSfx = true;
+            playLuxSfx();
+          }
+          if (now >= beam.warnUntil && !beam.hitApplied) {
+            const inBeam = beam.vertical
+              ? Math.abs(s.player.wx - beam.linePos) <= LUX_BEAM_HALF_W
+              : Math.abs(s.player.wy - beam.linePos) <= LUX_BEAM_HALF_W;
+            if (inBeam) {
+              s.playerHP -= Math.max(32, Math.round(d.projDmg * 1.8));
+              playDamageSfx();
+              beam.hitApplied = true;
+              if (s.playerHP <= 0) { s.playerHP = 0; setGamePhase('dead'); }
+            }
+          }
+          return true;
+        });
+
+        s.rockets = s.rockets.filter((rk) => {
+          if (now < rk.warnUntil) return true;
+          if (!rk.started) {
+            rk.started = true;
+            playRocketSfx();
+          }
+          rk.wx += rk.vx * dt;
+          rk.wy += rk.vy * dt;
+
+          if (rk.wx < -PROJECTILE_DESPAWN_MARGIN || rk.wx > WORLD_W + PROJECTILE_DESPAWN_MARGIN || rk.wy < -PROJECTILE_DESPAWN_MARGIN || rk.wy > WORLD_H + PROJECTILE_DESPAWN_MARGIN) {
+            return false;
+          }
+
+          if (circleCircle(s.player.wx, s.player.wy, PLAYER_HITBOX_RADIUS, rk.wx, rk.wy, rk.r)) {
+            s.playerHP -= Math.max(35, Math.round(d.projDmg * 1.6));
+            playDamageSfx();
+            for (let k = 0; k < 10; k++) {
+              const a = Math.random() * Math.PI * 2;
+              const sp = 80 + Math.random() * 120;
+              s.particles.push({ wx: rk.wx, wy: rk.wy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, born: now, life: 380 + Math.random() * 180, r: 2 + Math.random() * 4, color: '255,165,80' });
+            }
+            if (s.playerHP <= 0) { s.playerHP = 0; setGamePhase('dead'); }
+            return false;
+          }
+          return true;
+        });
 
         const margin = PROJECTILE_DESPAWN_MARGIN;
         const projHitR = Math.max(PROJECTILE_W, PROJECTILE_H) * 0.14;
@@ -676,6 +881,7 @@ export default function DodgeGame() {
 
         s.particles = s.particles.filter(pt => { pt.wx += pt.vx * dt; pt.wy += pt.vy * dt; pt.vx *= 0.96; pt.vy *= 0.96; return now - pt.born < pt.life; });
         s.ripples = s.ripples.filter(r => now - r.born < r.life);
+        s.warnings = s.warnings.filter(w => now - w.born < w.life);
       }
 
       draw(ctx, s, now);
@@ -684,7 +890,7 @@ export default function DodgeGame() {
     stateRef.current.lastTime = performance.now();
     rafRef.current = requestAnimationFrame(loop);
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-  }, [draw, playDamageSfx, playNearLaserSfx]);
+  }, [draw, playDamageSfx, playLuxSfx, playNearLaserSfx, playRocketSfx, playWarningSfx]);
 
   return (
     <div className="fixed inset-0 overflow-hidden bg-black">
@@ -703,4 +909,37 @@ export default function DodgeGame() {
       <canvas ref={canvasRef} className="block w-full h-full cursor-crosshair" />
     </div>
   );
+}
+
+function randomDirection() {
+  const dirs = ['top', 'right', 'bottom', 'left'];
+  return dirs[Math.floor(Math.random() * dirs.length)];
+}
+
+function spawnLuxBeam(now) {
+  const side = randomDirection();
+  const vertical = side === 'top' || side === 'bottom';
+  const linePos = vertical
+    ? 110 + Math.random() * (WORLD_W - 220)
+    : 110 + Math.random() * (WORLD_H - 220);
+  return {
+    side,
+    vertical,
+    linePos,
+    born: now,
+    warnUntil: now + LUX_WARNING_MS,
+    fireUntil: now + LUX_WARNING_MS + LUX_ACTIVE_MS,
+    firedSfx: false,
+    hitApplied: false,
+  };
+}
+
+function spawnRocket(now, speed) {
+  const side = randomDirection();
+  const m = PROJECTILE_SPAWN_MARGIN + 90;
+  const lane = 70 + Math.random() * (WORLD_W - 140);
+  if (side === 'top') return { side, wx: lane, wy: -m, vx: 0, vy: speed, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+  if (side === 'right') return { side, wx: WORLD_W + m, wy: lane, vx: -speed, vy: 0, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+  if (side === 'bottom') return { side, wx: lane, wy: WORLD_H + m, vx: 0, vy: -speed, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+  return { side, wx: -m, wy: lane, vx: speed, vy: 0, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
 }
