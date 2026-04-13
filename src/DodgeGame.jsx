@@ -35,6 +35,7 @@ const LUX_BEAM_HALF_W = 42;
 const ROCKET_WARNING_MS = 780;
 const ROCKET_RADIUS = 22;
 const ROCKET_BASE_SPEED = 520;
+const ROCKET_DESPAWN_MARGIN = 420;
 
 const WARNING_BLINK_MS = 140;
 
@@ -532,13 +533,30 @@ export default function DodgeGame() {
       const color = w.type === 'lux' ? `rgba(255, 110, 110, ${alpha.toFixed(3)})` : `rgba(255, 190, 110, ${alpha.toFixed(3)})`;
       const size = w.type === 'lux' ? 28 : 24;
       const pad = 24;
+      const lanePos = w.lanePos ?? (w.side === 'top' || w.side === 'bottom' ? WORLD_W / 2 : WORLD_H / 2);
       let cx = CW / 2;
       let cy = CH / 2;
-      if (w.side === 'top') cy = pad;
-      if (w.side === 'right') cx = CW - pad;
-      if (w.side === 'bottom') cy = CH - pad;
-      if (w.side === 'left') cx = pad;
-      const angle = w.side === 'top' ? Math.PI : w.side === 'right' ? -Math.PI / 2 : w.side === 'bottom' ? 0 : Math.PI / 2;
+      if (w.side === 'top') {
+        const anchor = proj.worldToScreen(clamp(lanePos, 0, WORLD_W), 0);
+        cx = clamp(anchor.sx, pad, CW - pad);
+        cy = pad;
+      }
+      if (w.side === 'right') {
+        const anchor = proj.worldToScreen(WORLD_W, clamp(lanePos, 0, WORLD_H));
+        cx = CW - pad;
+        cy = clamp(anchor.sy, pad, CH - pad);
+      }
+      if (w.side === 'bottom') {
+        const anchor = proj.worldToScreen(clamp(lanePos, 0, WORLD_W), WORLD_H);
+        cx = clamp(anchor.sx, pad, CW - pad);
+        cy = CH - pad;
+      }
+      if (w.side === 'left') {
+        const anchor = proj.worldToScreen(0, clamp(lanePos, 0, WORLD_H));
+        cx = pad;
+        cy = clamp(anchor.sy, pad, CH - pad);
+      }
+      const angle = w.side === 'top' ? 0 : w.side === 'right' ? Math.PI / 2 : w.side === 'bottom' ? Math.PI : -Math.PI / 2;
 
       ctx.save();
       ctx.translate(cx, cy);
@@ -780,7 +798,7 @@ export default function DodgeGame() {
           s.nextLux = now + s.luxInterval + (Math.random() - 0.5) * 900;
           const beam = spawnLuxBeam(now);
           s.luxBeams.push(beam);
-          s.warnings.push({ type: 'lux', side: beam.side, born: now, life: LUX_WARNING_MS });
+          s.warnings.push({ type: 'lux', side: beam.side, lanePos: beam.linePos, born: now, life: LUX_WARNING_MS });
           playWarningSfx(now);
         }
 
@@ -789,7 +807,7 @@ export default function DodgeGame() {
           const rocketSpeed = Math.max(ROCKET_BASE_SPEED, s.projectileSpeed * 1.65);
           const rocket = spawnRocket(now, rocketSpeed);
           s.rockets.push(rocket);
-          s.warnings.push({ type: 'rocket', side: rocket.side, born: now, life: ROCKET_WARNING_MS });
+          s.warnings.push({ type: 'rocket', side: rocket.side, lanePos: rocket.lanePos, born: now, life: ROCKET_WARNING_MS });
           playWarningSfx(now);
         }
 
@@ -822,7 +840,7 @@ export default function DodgeGame() {
           rk.wx += rk.vx * dt;
           rk.wy += rk.vy * dt;
 
-          if (rk.wx < -PROJECTILE_DESPAWN_MARGIN || rk.wx > WORLD_W + PROJECTILE_DESPAWN_MARGIN || rk.wy < -PROJECTILE_DESPAWN_MARGIN || rk.wy > WORLD_H + PROJECTILE_DESPAWN_MARGIN) {
+          if (rk.wx < -ROCKET_DESPAWN_MARGIN || rk.wx > WORLD_W + ROCKET_DESPAWN_MARGIN || rk.wy < -ROCKET_DESPAWN_MARGIN || rk.wy > WORLD_H + ROCKET_DESPAWN_MARGIN) {
             return false;
           }
 
@@ -936,10 +954,19 @@ function spawnLuxBeam(now) {
 
 function spawnRocket(now, speed) {
   const side = randomDirection();
-  const m = PROJECTILE_SPAWN_MARGIN + 90;
-  const lane = 70 + Math.random() * (WORLD_W - 140);
-  if (side === 'top') return { side, wx: lane, wy: -m, vx: 0, vy: speed, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
-  if (side === 'right') return { side, wx: WORLD_W + m, wy: lane, vx: -speed, vy: 0, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
-  if (side === 'bottom') return { side, wx: lane, wy: WORLD_H + m, vx: 0, vy: -speed, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
-  return { side, wx: -m, wy: lane, vx: speed, vy: 0, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+  const m = PROJECTILE_SPAWN_MARGIN;
+  if (side === 'top') {
+    const lanePos = 70 + Math.random() * (WORLD_W - 140);
+    return { side, lanePos, wx: lanePos, wy: -m, vx: 0, vy: speed, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+  }
+  if (side === 'right') {
+    const lanePos = 70 + Math.random() * (WORLD_H - 140);
+    return { side, lanePos, wx: WORLD_W + m, wy: lanePos, vx: -speed, vy: 0, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+  }
+  if (side === 'bottom') {
+    const lanePos = 70 + Math.random() * (WORLD_W - 140);
+    return { side, lanePos, wx: lanePos, wy: WORLD_H + m, vx: 0, vy: -speed, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+  }
+  const lanePos = 70 + Math.random() * (WORLD_H - 140);
+  return { side, lanePos, wx: -m, wy: lanePos, vx: speed, vy: 0, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
 }
