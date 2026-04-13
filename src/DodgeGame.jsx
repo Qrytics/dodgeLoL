@@ -4,12 +4,18 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 const WORLD_W = 900;
 const WORLD_H = 900;
 
-// ─── Difficulty presets ───────────────────────────────────────────────────────
-const DIFFICULTIES = {
-  easy:   { label: 'Easy',   spawnInterval: 2000, projSpeed: 140, aoeInterval: 6000, escalationInterval: 15, speedInc: 15, spawnDec: 50,  minSpawn: 600, projDmg: 15, aoeDmg: 25, flashCd: 10 },
-  normal: { label: 'Normal', spawnInterval: 1400, projSpeed: 200, aoeInterval: 4000, escalationInterval: 10, speedInc: 25, spawnDec: 80,  minSpawn: 350, projDmg: 20, aoeDmg: 35, flashCd: 15 },
-  hard:   { label: 'Hard',   spawnInterval: 1000, projSpeed: 260, aoeInterval: 3000, escalationInterval: 8,  speedInc: 35, spawnDec: 100, minSpawn: 250, projDmg: 25, aoeDmg: 40, flashCd: 18 },
-  insane: { label: 'Insane', spawnInterval: 700,  projSpeed: 320, aoeInterval: 2200, escalationInterval: 6,  speedInc: 45, spawnDec: 120, minSpawn: 180, projDmg: 30, aoeDmg: 50, flashCd: 22 },
+// ─── Single ramping profile ──────────────────────────────────────────────────
+const RAMP_CONFIG = {
+  spawnInterval: 1400,
+  projSpeed: 200,
+  aoeInterval: 4000,
+  escalationInterval: 10,
+  speedInc: 25,
+  spawnDec: 80,
+  minSpawn: 350,
+  projDmg: 20,
+  aoeDmg: 35,
+  flashCd: 15,
 };
 
 // ─── Game constants ───────────────────────────────────────────────────────────
@@ -36,6 +42,17 @@ const ROCKET_WARNING_MS = 780;
 const ROCKET_RADIUS = 22;
 const ROCKET_BASE_SPEED = 520;
 const ROCKET_DESPAWN_MARGIN = 420;
+
+const TURRET_FALL_MS = 800;
+const TURRET_LIFE_MS = 7000;
+const TURRET_BASE_INTERVAL = 11500;
+const TURRET_MIN_INTERVAL = 5200;
+const TURRET_INTERVAL_DECAY = 220;
+const TURRET_SHOT_BASE_INTERVAL = 760;
+const TURRET_SHOT_MIN_INTERVAL = 240;
+const TURRET_SHOT_DECAY = 18;
+const TURRET_SHOT_SPEED = 360;
+const TURRET_SHOT_RADIUS = 5;
 
 const WARNING_BLINK_MS = 140;
 
@@ -133,25 +150,25 @@ export default function DodgeGame() {
   const canvasRef = useRef(null);
   const projRef = useRef(makeProjection(1200, 800));
   const [gamePhase, setGamePhase] = useState('menu');
-  const [difficulty, setDifficulty] = useState('normal');
   const phaseRef = useRef('menu');
-  const diffRef = useRef('normal');
+  const [musicVolume, setMusicVolume] = useState(0.5);
 
   useEffect(() => { phaseRef.current = gamePhase; }, [gamePhase]);
-  useEffect(() => { diffRef.current = difficulty; }, [difficulty]);
 
   const stateRef = useRef({
     player: { wx: WORLD_W / 2, wy: WORLD_H / 2 },
     playerTarget: null, playerHP: 100,
     flashCooldownLeft: 0, mouseWx: WORLD_W / 2, mouseWy: WORLD_H / 2,
-    projectiles: [], aoes: [], luxBeams: [], rockets: [], warnings: [], ripples: [], particles: [],
+    projectiles: [], aoes: [], luxBeams: [], rockets: [], turret: null, turretShots: [], warnings: [], ripples: [], particles: [],
     score: 0, highScore: 0, lastTime: 0, elapsed: 0,
     nextSpawn: 0, spawnInterval: 0, projectileSpeed: 0,
     nextAoe: 0, aoeInterval: 0, nextLux: 0, luxInterval: 0,
-    nextRocket: 0, rocketInterval: 0, nextEscalation: 0,
-    diff: DIFFICULTIES.normal, cw: 1200, ch: 800,
+    nextRocket: 0, rocketInterval: 0, nextTurret: 0,
+    turretInterval: 0, turretShotInterval: 0, nextEscalation: 0,
+    cw: 1200, ch: 800,
   });
   const rafRef = useRef(null);
+  const gameAudioRef = useRef(null);
   const rightHoldRef = useRef({ active: false, pointerId: null });
   const audioRef = useRef({
     ctx: null,
@@ -292,7 +309,21 @@ export default function DodgeGame() {
     const bag = ensureAudio();
     if (!bag?.ctx || bag.ctx.state !== 'running') return;
     if (bag.bgmMode === mode) return;
+
+    // Stop MP3 if leaving game mode
+    if (bag.bgmMode === 'game' && gameAudioRef.current) {
+      gameAudioRef.current.pause();
+      gameAudioRef.current.currentTime = 0;
+    }
     stopBgm();
+
+    if (mode === 'game') {
+      bag.bgmMode = 'game';
+      if (gameAudioRef.current) {
+        gameAudioRef.current.play().catch(() => {});
+      }
+      return;
+    }
 
     const ctx = bag.ctx;
     const intervalMs = mode === 'menu' ? 880 : 320;
@@ -325,9 +356,17 @@ export default function DodgeGame() {
 
   useEffect(() => () => {
     stopBgm();
+    if (gameAudioRef.current) {
+      gameAudioRef.current.pause();
+      gameAudioRef.current.currentTime = 0;
+    }
     const bag = audioRef.current;
     if (bag.ctx && bag.ctx.state !== 'closed') bag.ctx.close();
   }, [stopBgm]);
+
+  useEffect(() => {
+    if (gameAudioRef.current) gameAudioRef.current.volume = musicVolume;
+  }, [musicVolume]);
 
   // ── Resize ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -345,7 +384,7 @@ export default function DodgeGame() {
 
   // ── Draw helper: game entities ─────────────────────────────────────────────
   const drawEntities = useCallback((ctx, state, now, proj, CW) => {
-    const { player, projectiles, aoes, luxBeams, rockets, warnings, ripples, particles, flashCooldownLeft, ch: CH } = state;
+    const { player, projectiles, aoes, luxBeams, rockets, turret, turretShots, warnings, ripples, particles, flashCooldownLeft, ch: CH } = state;
 
     // Ripples
     for (const rip of ripples) {
@@ -426,6 +465,46 @@ export default function DodgeGame() {
       ctx.restore();
     }
 
+    // Turret
+    if (turret && now <= turret.despawnAt) {
+      const { sx, sy } = proj.worldToScreen(turret.wx, turret.wy);
+      const tRx = 14 * proj.scale;
+      const tRy = Math.max(4, tRx * (proj.sinA / proj.cosA));
+      const pulse = 0.75 + 0.25 * Math.sin(now / 110);
+      ctx.fillStyle = `rgba(255, 45, 70, ${pulse.toFixed(3)})`;
+      ctx.shadowColor = 'rgba(255, 40, 80, 0.9)';
+      ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, Math.max(7, tRx), tRy, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      const topY = sy - 13 * proj.scale;
+      ctx.strokeStyle = 'rgba(255,120,130,0.95)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 2 * proj.scale);
+      ctx.lineTo(sx, topY);
+      ctx.stroke();
+
+      ctx.fillStyle = 'rgba(255, 205, 210, 0.98)';
+      ctx.beginPath();
+      ctx.arc(sx, topY, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Turret shots
+    for (const ts of turretShots) {
+      const { sx, sy } = proj.worldToScreen(ts.wx, ts.wy);
+      ctx.fillStyle = 'rgba(255, 25, 70, 0.95)';
+      ctx.shadowColor = 'rgba(255, 30, 90, 0.95)';
+      ctx.shadowBlur = 11;
+      ctx.beginPath();
+      ctx.arc(sx, sy, Math.max(2, ts.r * proj.scale), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
     // Projectiles
     for (const p of projectiles) {
       const { sx, sy } = proj.worldToScreen(p.wx, p.wy);
@@ -498,7 +577,7 @@ export default function DodgeGame() {
     // Flash ring
     const ringR = bRx + 6;
     if (flashCooldownLeft > 0) {
-      const p2 = 1 - flashCooldownLeft / state.diff.flashCd;
+      const p2 = 1 - flashCooldownLeft / RAMP_CONFIG.flashCd;
       ctx.strokeStyle = 'rgba(170,130,255,0.45)'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(psx, psy, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * p2); ctx.stroke();
     } else {
@@ -507,7 +586,7 @@ export default function DodgeGame() {
     }
 
     // HUD
-    const hudX = 80, hudY = 50;
+    const hudX = 14, hudY = 50;
     ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.beginPath(); ctx.roundRect(hudX, hudY, 170, 60, 8); ctx.fill();
     ctx.fillStyle = '#c8d6ff'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
     ctx.fillText(`Time: ${state.score.toFixed(1)}s`, hudX + 12, hudY + 22);
@@ -522,7 +601,7 @@ export default function DodgeGame() {
     ctx.fillStyle = flashReady ? '#fff' : '#555'; ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
     ctx.fillText('[D / F]', fX + 38, fY + 17);
     ctx.font = '11px monospace';
-    ctx.fillText(flashReady ? 'FLASH ⚡' : `${Math.ceil(flashCooldownLeft * (FLASH_VISUAL_COOLDOWN / state.diff.flashCd))}s`, fX + 38, fY + 35);
+    ctx.fillText(flashReady ? 'FLASH ⚡' : `${Math.ceil(flashCooldownLeft * (FLASH_VISUAL_COOLDOWN / RAMP_CONFIG.flashCd))}s`, fX + 38, fY + 35);
     ctx.textAlign = 'left';
 
     // Directional warnings
@@ -626,20 +705,6 @@ export default function DodgeGame() {
       ctx.font = `${Math.min(CW * 0.02, 18)}px Arial`; ctx.fillStyle = '#7788aa';
       ctx.fillText('Right-click to move  ·  D / F to Flash  ·  ESC to menu', CW / 2, CH / 2 - CH * 0.06);
       ctx.fillText('Dodge all incoming skillshots — survive as long as you can', CW / 2, CH / 2 - CH * 0.025);
-
-      // Difficulty badges
-      const diffs = Object.entries(DIFFICULTIES);
-      const bW = Math.min(110, CW * 0.1), gap = 14, total = diffs.length * bW + (diffs.length - 1) * gap;
-      const sx = CW / 2 - total / 2, by = CH / 2 + CH * 0.02;
-      ctx.font = `bold ${Math.min(15, CW * 0.016)}px Arial`;
-      for (let i = 0; i < diffs.length; i++) {
-        const [key, val] = diffs[i], bx = sx + i * (bW + gap), sel = key === diffRef.current;
-        ctx.fillStyle = sel ? 'rgba(80,140,255,0.85)' : 'rgba(40,50,70,0.8)';
-        ctx.beginPath(); ctx.roundRect(bx, by, bW, 36, 6); ctx.fill();
-        if (sel) { ctx.strokeStyle = 'rgba(120,180,255,0.9)'; ctx.lineWidth = 2; ctx.stroke(); }
-        ctx.fillStyle = sel ? '#fff' : '#8899bb'; ctx.textAlign = 'center';
-        ctx.fillText(val.label, bx + bW / 2, by + 23);
-      }
       ctx.fillStyle = '#4fc3f7'; ctx.font = `bold ${Math.min(CW * 0.022, 22)}px Arial`;
       ctx.fillText('Right-click anywhere to START', CW / 2, CH / 2 + CH * 0.11);
       ctx.textAlign = 'left';
@@ -668,21 +733,23 @@ export default function DodgeGame() {
 
   // ── Start / Restart ────────────────────────────────────────────────────────
   const startGame = useCallback(() => {
-    const d = DIFFICULTIES[diffRef.current];
+    const d = RAMP_CONFIG;
     const s = stateRef.current;
-    s.diff = d;
     s.player = { wx: WORLD_W / 2, wy: WORLD_H / 2 };
     s.playerTarget = null; s.playerHP = 100; s.flashCooldownLeft = 0;
-    s.projectiles = []; s.aoes = []; s.luxBeams = []; s.rockets = []; s.warnings = []; s.ripples = []; s.particles = [];
+    s.projectiles = []; s.aoes = []; s.luxBeams = []; s.rockets = []; s.turret = null; s.turretShots = []; s.warnings = []; s.ripples = []; s.particles = [];
     s.score = 0; s.elapsed = 0;
     s.lastTime = performance.now();
     s.nextSpawn = performance.now() + 1200;
     s.nextAoe = performance.now() + 3000;
     s.nextLux = performance.now() + 5200;
     s.nextRocket = performance.now() + 4300;
+    s.nextTurret = performance.now() + 6200;
     s.spawnInterval = d.spawnInterval; s.projectileSpeed = d.projSpeed;
     s.luxInterval = 12800;
     s.rocketInterval = 7600;
+    s.turretInterval = TURRET_BASE_INTERVAL;
+    s.turretShotInterval = TURRET_SHOT_BASE_INTERVAL;
     s.aoeInterval = d.aoeInterval; s.nextEscalation = d.escalationInterval;
     setGamePhase('playing');
   }, []);
@@ -706,20 +773,6 @@ export default function DodgeGame() {
       unlockAudio();
       if (phaseRef.current === 'playing') setBgmMode('game');
       else setBgmMode('menu');
-      const rect = canvas.getBoundingClientRect();
-      const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-      const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-      if (e.button === 0 && phaseRef.current === 'menu') {
-        const CW = canvas.width, CH = canvas.height;
-        const diffs = Object.keys(DIFFICULTIES);
-        const bW = Math.min(110, CW * 0.1), gap = 14, total = diffs.length * bW + (diffs.length - 1) * gap;
-        const sx = CW / 2 - total / 2, by = CH / 2 + CH * 0.02;
-        for (let i = 0; i < diffs.length; i++) {
-          const bx = sx + i * (bW + gap);
-          if (mx >= bx && mx <= bx + bW && my >= by && my <= by + 36) { setDifficulty(diffs[i]); return; }
-        }
-      }
 
       if (e.button !== 2) return;
       e.preventDefault();
@@ -769,7 +822,7 @@ export default function DodgeGame() {
           s.player.wy = clamp(s.player.wy + (dy / d) * fd, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS);
         }
         playFlashSfx();
-        s.flashCooldownLeft = s.diff.flashCd; s.playerTarget = null;
+        s.flashCooldownLeft = RAMP_CONFIG.flashCd; s.playerTarget = null;
       }
     };
 
@@ -803,7 +856,7 @@ export default function DodgeGame() {
       if (phaseRef.current === 'playing') {
         s.elapsed += dt; s.score = s.elapsed;
         if (s.score > s.highScore) s.highScore = s.score;
-        const d = s.diff;
+        const d = RAMP_CONFIG;
 
         if (s.elapsed >= s.nextEscalation) {
           s.nextEscalation += d.escalationInterval;
@@ -812,6 +865,8 @@ export default function DodgeGame() {
           s.aoeInterval = Math.max(1800, s.aoeInterval - 180);
           s.luxInterval = Math.max(7600, s.luxInterval - 220);
           s.rocketInterval = Math.max(4300, s.rocketInterval - 150);
+          s.turretInterval = Math.max(TURRET_MIN_INTERVAL, s.turretInterval - TURRET_INTERVAL_DECAY);
+          s.turretShotInterval = Math.max(TURRET_SHOT_MIN_INTERVAL, s.turretShotInterval - TURRET_SHOT_DECAY);
         }
 
         if (s.flashCooldownLeft > 0) s.flashCooldownLeft = Math.max(0, s.flashCooldownLeft - dt);
@@ -849,6 +904,48 @@ export default function DodgeGame() {
           s.warnings.push({ type: 'rocket', side: rocket.side, lanePos: rocket.lanePos, born: now, life: ROCKET_WARNING_MS });
           playWarningSfx(now);
         }
+
+        if (!s.turret && now >= s.nextTurret) {
+          s.turret = spawnTurret(now, s.turretShotInterval);
+          s.nextTurret = now + s.turretInterval + (Math.random() - 0.5) * 700;
+        }
+
+        if (s.turret) {
+          if (now >= s.turret.despawnAt) {
+            s.turret = null;
+          } else if (now < s.turret.activeAt) {
+            const p = clamp((now - s.turret.born) / TURRET_FALL_MS, 0, 1);
+            s.turret.wy = -220 + (s.turret.targetWy + 220) * p;
+          } else if (now >= s.turret.nextShotAt) {
+            const dx = s.player.wx - s.turret.wx;
+            const dy = s.player.wy - s.turret.wy;
+            const len = Math.max(1, Math.hypot(dx, dy));
+            const shotSpeed = Math.max(TURRET_SHOT_SPEED, s.projectileSpeed * 1.3);
+            s.turretShots.push({
+              wx: s.turret.wx,
+              wy: s.turret.wy,
+              vx: (dx / len) * shotSpeed,
+              vy: (dy / len) * shotSpeed,
+              r: TURRET_SHOT_RADIUS,
+            });
+            s.turret.nextShotAt = now + s.turretShotInterval + (Math.random() - 0.5) * 70;
+          }
+        }
+
+        s.turretShots = s.turretShots.filter((shot) => {
+          shot.wx += shot.vx * dt;
+          shot.wy += shot.vy * dt;
+          if (shot.wx < -PROJECTILE_DESPAWN_MARGIN || shot.wx > WORLD_W + PROJECTILE_DESPAWN_MARGIN || shot.wy < -PROJECTILE_DESPAWN_MARGIN || shot.wy > WORLD_H + PROJECTILE_DESPAWN_MARGIN) {
+            return false;
+          }
+          if (circleCircle(s.player.wx, s.player.wy, PLAYER_HITBOX_RADIUS, shot.wx, shot.wy, shot.r)) {
+            s.playerHP -= Math.max(10, Math.round(d.projDmg * 0.55));
+            playDamageSfx();
+            if (s.playerHP <= 0) { s.playerHP = 0; setGamePhase('dead'); }
+            return false;
+          }
+          return true;
+        });
 
         s.luxBeams = s.luxBeams.filter((beam) => {
           if (now > beam.fireUntil) return false;
@@ -963,7 +1060,25 @@ export default function DodgeGame() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
         Back to Games
       </a>
-      <canvas ref={canvasRef} className="block w-full h-full cursor-crosshair" />
+      <canvas ref={canvasRef} className="block w-full h-full" style={{ cursor: "url('/cursor.svg') 20 20, crosshair" }} />
+      <audio ref={gameAudioRef} src="/Wind_Wall_Panic.mp3" loop preload="auto" />
+      <div
+        onContextMenu={e => e.preventDefault()}
+        style={{
+          position: 'fixed', bottom: '16px', right: '16px', zIndex: 50,
+          display: 'flex', alignItems: 'center', gap: '8px',
+          background: 'rgba(8,8,24,0.78)', border: '1px solid rgba(80,140,255,0.28)',
+          borderRadius: '10px', padding: '6px 12px', backdropFilter: 'blur(10px)',
+        }}
+      >
+        <span style={{ fontSize: '13px', color: '#7799cc', userSelect: 'none' }}>♪</span>
+        <input
+          type="range" min="0" max="1" step="0.01"
+          value={musicVolume}
+          onChange={e => setMusicVolume(parseFloat(e.target.value))}
+          style={{ width: '80px', accentColor: '#4fc3f7', cursor: 'pointer', verticalAlign: 'middle' }}
+        />
+      </div>
     </div>
   );
 }
@@ -1008,4 +1123,19 @@ function spawnRocket(now, speed) {
   }
   const lanePos = 70 + Math.random() * (WORLD_H - 140);
   return { side, lanePos, wx: -m, wy: lanePos, vx: speed, vy: 0, r: ROCKET_RADIUS, warnUntil: now + ROCKET_WARNING_MS, started: false };
+}
+
+function spawnTurret(now, shotInterval) {
+  const wx = 100 + Math.random() * (WORLD_W - 200);
+  const targetWy = 100 + Math.random() * (WORLD_H - 200);
+  return {
+    wx,
+    wy: -220,
+    targetWy,
+    born: now,
+    activeAt: now + TURRET_FALL_MS,
+    despawnAt: now + TURRET_LIFE_MS,
+    nextShotAt: now + TURRET_FALL_MS + 220,
+    shotInterval,
+  };
 }
