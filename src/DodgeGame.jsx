@@ -19,8 +19,11 @@ const PLAYER_SPEED = 260;
 const FLASH_RANGE = 230;
 const FLASH_VISUAL_COOLDOWN = 300;
 
-const PROJECTILE_W = 12;
-const PROJECTILE_H = 38;
+const PROJECTILE_W = 7;
+const PROJECTILE_H = 96;
+const PROJECTILE_SPAWN_MARGIN = 260;
+const PROJECTILE_DESPAWN_MARGIN = 280;
+const PROJECTILE_NEAR_RADIUS = 72;
 
 const AOE_RADIUS = 55;
 const AOE_DELAY = 1500;
@@ -32,6 +35,16 @@ const ARRIVAL_THRESHOLD = 4;
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 function dist(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by); }
 function circleCircle(cx1, cy1, r1, cx2, cy2, r2) { return dist(cx1, cy1, cx2, cy2) < r1 + r2; }
+
+function createNoiseBuffer(ctx) {
+  const length = Math.floor(ctx.sampleRate * 0.16);
+  const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) {
+    data[i] = (Math.random() * 2 - 1) * (1 - i / length);
+  }
+  return buffer;
+}
 
 // ─── Dynamic isometric projection ────────────────────────────────────────────
 function makeProjection(canvasW, canvasH) {
@@ -58,7 +71,7 @@ function makeProjection(canvasW, canvasH) {
 // ─── Spawners ─────────────────────────────────────────────────────────────────
 function spawnProjectile(tx, ty, speed) {
   const edge = Math.floor(Math.random() * 4);
-  const m = PROJECTILE_H + 20;
+  const m = PROJECTILE_SPAWN_MARGIN;
   let wx, wy;
   switch (edge) {
     case 0: wx = Math.random() * WORLD_W; wy = -m; break;
@@ -116,6 +129,17 @@ export default function DodgeGame() {
   useEffect(() => { phaseRef.current = gamePhase; }, [gamePhase]);
   useEffect(() => { diffRef.current = difficulty; }, [difficulty]);
 
+  useEffect(() => {
+    if (gamePhase === 'playing') setBgmMode('game');
+    if (gamePhase === 'menu' || gamePhase === 'dead') setBgmMode('menu');
+  }, [gamePhase, setBgmMode]);
+
+  useEffect(() => () => {
+    stopBgm();
+    const bag = audioRef.current;
+    if (bag.ctx && bag.ctx.state !== 'closed') bag.ctx.close();
+  }, [stopBgm]);
+
   const stateRef = useRef({
     player: { wx: WORLD_W / 2, wy: WORLD_H / 2 },
     playerTarget: null, playerHP: 100,
@@ -127,6 +151,137 @@ export default function DodgeGame() {
     diff: DIFFICULTIES.normal, cw: 1200, ch: 800,
   });
   const rafRef = useRef(null);
+  const audioRef = useRef({ ctx: null, master: null, noise: null, bgmStop: null, lastNearSfxAt: 0, bgmMode: null });
+
+  const ensureAudio = useCallback(() => {
+    const bag = audioRef.current;
+    if (!bag.ctx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      bag.ctx = new Ctx();
+      bag.master = bag.ctx.createGain();
+      bag.master.gain.value = 0.2;
+      bag.master.connect(bag.ctx.destination);
+      bag.noise = createNoiseBuffer(bag.ctx);
+    }
+    return bag;
+  }, []);
+
+  const unlockAudio = useCallback(() => {
+    const bag = ensureAudio();
+    if (!bag?.ctx) return;
+    if (bag.ctx.state === 'suspended') bag.ctx.resume();
+  }, [ensureAudio]);
+
+  const stopBgm = useCallback(() => {
+    const bag = audioRef.current;
+    if (bag.bgmStop) {
+      bag.bgmStop();
+      bag.bgmStop = null;
+    }
+    bag.bgmMode = null;
+  }, []);
+
+  const playTone = useCallback((ctx, options = {}) => {
+    const bag = audioRef.current;
+    if (!bag.master) return;
+    const {
+      freq = 440,
+      toFreq = null,
+      type = 'sine',
+      gain = 0.08,
+      attack = 0.005,
+      release = 0.12,
+      duration = 0.16,
+      when = ctx.currentTime,
+      detune = 0,
+    } = options;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, when);
+    if (toFreq) osc.frequency.exponentialRampToValueAtTime(Math.max(toFreq, 1), when + duration);
+    if (detune) osc.detune.value = detune;
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(Math.max(gain, 0.0001), when + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + release + attack);
+    osc.connect(g); g.connect(bag.master);
+    osc.start(when);
+    osc.stop(when + duration + release + 0.02);
+  }, []);
+
+  const playNoise = useCallback((ctx, options = {}) => {
+    const bag = audioRef.current;
+    if (!bag.master || !bag.noise) return;
+    const { gain = 0.06, duration = 0.08, when = ctx.currentTime } = options;
+    const src = ctx.createBufferSource();
+    const filter = ctx.createBiquadFilter();
+    const g = ctx.createGain();
+    src.buffer = bag.noise;
+    filter.type = 'bandpass';
+    filter.frequency.value = 1600;
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(gain, when + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+    src.connect(filter); filter.connect(g); g.connect(bag.master);
+    src.start(when);
+    src.stop(when + duration + 0.02);
+  }, []);
+
+  const playDamageSfx = useCallback(() => {
+    const bag = ensureAudio();
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
+    const t = bag.ctx.currentTime + 0.001;
+    playTone(bag.ctx, { freq: 220, toFreq: 90, type: 'sawtooth', gain: 0.08, duration: 0.11, release: 0.08, when: t });
+    playNoise(bag.ctx, { gain: 0.045, duration: 0.07, when: t + 0.005 });
+  }, [ensureAudio, playNoise, playTone]);
+
+  const playNearLaserSfx = useCallback((nowMs) => {
+    const bag = ensureAudio();
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
+    if (nowMs - bag.lastNearSfxAt < 180) return;
+    bag.lastNearSfxAt = nowMs;
+    const t = bag.ctx.currentTime + 0.001;
+    playTone(bag.ctx, { freq: 1600, toFreq: 900, type: 'triangle', gain: 0.03, duration: 0.06, release: 0.07, when: t });
+  }, [ensureAudio, playTone]);
+
+  const playFlashSfx = useCallback(() => {
+    const bag = ensureAudio();
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
+    const t = bag.ctx.currentTime + 0.001;
+    playTone(bag.ctx, { freq: 420, toFreq: 980, type: 'triangle', gain: 0.07, duration: 0.09, release: 0.09, when: t });
+    playTone(bag.ctx, { freq: 760, toFreq: 1400, type: 'sine', gain: 0.05, duration: 0.08, release: 0.08, when: t + 0.01 });
+  }, [ensureAudio, playTone]);
+
+  const setBgmMode = useCallback((mode) => {
+    const bag = ensureAudio();
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
+    if (bag.bgmMode === mode) return;
+    stopBgm();
+
+    const ctx = bag.ctx;
+    const intervalMs = mode === 'menu' ? 880 : 320;
+    const notes = mode === 'menu' ? [261.63, 329.63, 392.0, 329.63] : [174.61, 196, 220, 246.94, 220, 196];
+    let step = 0;
+
+    const tick = () => {
+      const when = ctx.currentTime + 0.03;
+      const n = notes[step % notes.length];
+      if (mode === 'menu') {
+        playTone(ctx, { freq: n, toFreq: n * 1.006, type: 'triangle', gain: 0.038, duration: 0.5, release: 0.35, when });
+        playTone(ctx, { freq: n / 2, type: 'sine', gain: 0.018, duration: 0.52, release: 0.38, when: when + 0.02 });
+      } else {
+        playTone(ctx, { freq: n, toFreq: n * 0.96, type: 'sawtooth', gain: 0.03, duration: 0.16, release: 0.12, when });
+        playTone(ctx, { freq: n * 2, toFreq: n * 2.25, type: 'square', gain: 0.013, duration: 0.055, release: 0.06, when: when + 0.025 });
+      }
+      step++;
+    };
+
+    tick();
+    const id = window.setInterval(tick, intervalMs);
+    bag.bgmMode = mode;
+    bag.bgmStop = () => window.clearInterval(id);
+  }, [ensureAudio, playTone, stopBgm]);
 
   // ── Resize ─────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -171,11 +326,22 @@ export default function DodgeGame() {
       const { sx, sy } = proj.worldToScreen(p.wx, p.wy);
       const { sx: sx2, sy: sy2 } = proj.worldToScreen(p.wx + p.vx * 0.04, p.wy + p.vy * 0.04);
       const sa = Math.atan2(sy2 - sy, sx2 - sx);
-      ctx.save(); ctx.translate(sx, sy); ctx.rotate(sa - Math.PI / 2); ctx.scale(1, 0.5);
+      ctx.save(); ctx.translate(sx, sy); ctx.rotate(sa - Math.PI / 2); ctx.scale(1, 0.42);
       const grad = ctx.createLinearGradient(0, -p.h / 2, 0, p.h / 2);
-      grad.addColorStop(0, 'rgba(255,80,80,0.95)'); grad.addColorStop(0.4, 'rgba(255,150,40,1)'); grad.addColorStop(1, 'rgba(255,80,80,0.2)');
-      ctx.fillStyle = grad; ctx.shadowColor = 'rgba(255,100,0,0.8)'; ctx.shadowBlur = 10;
+      grad.addColorStop(0, 'rgba(75,220,255,0.02)');
+      grad.addColorStop(0.2, 'rgba(120,240,255,0.75)');
+      grad.addColorStop(0.5, 'rgba(235,255,255,1)');
+      grad.addColorStop(0.8, 'rgba(120,240,255,0.75)');
+      grad.addColorStop(1, 'rgba(75,220,255,0.02)');
+      ctx.fillStyle = grad; ctx.shadowColor = 'rgba(0,210,255,0.95)'; ctx.shadowBlur = 16;
       ctx.beginPath(); ctx.roundRect(-p.w / 2, -p.h / 2, p.w, p.h, 4); ctx.fill();
+
+      const core = ctx.createLinearGradient(0, -p.h / 2, 0, p.h / 2);
+      core.addColorStop(0, 'rgba(255,255,255,0.08)');
+      core.addColorStop(0.5, 'rgba(255,255,255,0.95)');
+      core.addColorStop(1, 'rgba(255,255,255,0.08)');
+      ctx.fillStyle = core;
+      ctx.beginPath(); ctx.roundRect(-p.w / 6, -p.h / 2, p.w / 3, p.h, 2); ctx.fill();
       ctx.restore();
     }
 
@@ -358,6 +524,7 @@ export default function DodgeGame() {
   // ── Input ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
+    canvas.style.touchAction = 'none';
 
     const wc = (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -367,22 +534,26 @@ export default function DodgeGame() {
       return { wx: clamp(wx, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS), wy: clamp(wy, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS) };
     };
 
-    const onClick = (e) => {
-      if (phaseRef.current !== 'menu') return;
+    const onPointerDown = (e) => {
+      unlockAudio();
+      if (phaseRef.current === 'playing') setBgmMode('game');
+      else setBgmMode('menu');
       const rect = canvas.getBoundingClientRect();
       const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
       const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-      const CW = canvas.width, CH = canvas.height;
-      const diffs = Object.keys(DIFFICULTIES);
-      const bW = Math.min(110, CW * 0.1), gap = 14, total = diffs.length * bW + (diffs.length - 1) * gap;
-      const sx = CW / 2 - total / 2, by = CH / 2 + CH * 0.02;
-      for (let i = 0; i < diffs.length; i++) {
-        const bx = sx + i * (bW + gap);
-        if (mx >= bx && mx <= bx + bW && my >= by && my <= by + 36) { setDifficulty(diffs[i]); return; }
-      }
-    };
 
-    const onCtx = (e) => {
+      if (e.button === 0 && phaseRef.current === 'menu') {
+        const CW = canvas.width, CH = canvas.height;
+        const diffs = Object.keys(DIFFICULTIES);
+        const bW = Math.min(110, CW * 0.1), gap = 14, total = diffs.length * bW + (diffs.length - 1) * gap;
+        const sx = CW / 2 - total / 2, by = CH / 2 + CH * 0.02;
+        for (let i = 0; i < diffs.length; i++) {
+          const bx = sx + i * (bW + gap);
+          if (mx >= bx && mx <= bx + bW && my >= by && my <= by + 36) { setDifficulty(diffs[i]); return; }
+        }
+      }
+
+      if (e.button !== 2) return;
       e.preventDefault();
       const phase = phaseRef.current;
       if (phase === 'menu' || phase === 'dead') { startGame(); return; }
@@ -393,8 +564,12 @@ export default function DodgeGame() {
     };
 
     const onMove = (e) => { const { wx, wy } = wc(e); stateRef.current.mouseWx = wx; stateRef.current.mouseWy = wy; };
+    const blockContextMenu = (e) => e.preventDefault();
 
     const onKey = (e) => {
+      unlockAudio();
+      if (phaseRef.current === 'playing') setBgmMode('game');
+      else setBgmMode('menu');
       if (e.key === 'Escape') { e.preventDefault(); goToMenu(); return; }
       if (phaseRef.current === 'dead' && e.key === ' ') { e.preventDefault(); startGame(); return; }
       if (phaseRef.current !== 'playing') return;
@@ -406,16 +581,17 @@ export default function DodgeGame() {
           s.player.wx = clamp(s.player.wx + (dx / d) * fd, PLAYER_RADIUS, WORLD_W - PLAYER_RADIUS);
           s.player.wy = clamp(s.player.wy + (dy / d) * fd, PLAYER_RADIUS, WORLD_H - PLAYER_RADIUS);
         }
+        playFlashSfx();
         s.flashCooldownLeft = s.diff.flashCd; s.playerTarget = null;
       }
     };
 
-    canvas.addEventListener('click', onClick);
-    canvas.addEventListener('contextmenu', onCtx);
-    canvas.addEventListener('mousemove', onMove);
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onMove, { passive: true });
+    canvas.addEventListener('contextmenu', blockContextMenu);
     window.addEventListener('keydown', onKey);
-    return () => { canvas.removeEventListener('click', onClick); canvas.removeEventListener('contextmenu', onCtx); canvas.removeEventListener('mousemove', onMove); window.removeEventListener('keydown', onKey); };
-  }, [startGame, goToMenu]);
+    return () => { canvas.removeEventListener('pointerdown', onPointerDown); canvas.removeEventListener('pointermove', onMove); canvas.removeEventListener('contextmenu', blockContextMenu); window.removeEventListener('keydown', onKey); };
+  }, [goToMenu, playFlashSfx, setBgmMode, startGame, unlockAudio]);
 
   // ── Game loop ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -459,12 +635,18 @@ export default function DodgeGame() {
           s.aoes.push(spawnAoE(s.player.wx, s.player.wy));
         }
 
-        const margin = 150, projHitR = Math.max(PROJECTILE_W, PROJECTILE_H) * 0.3;
+        const margin = PROJECTILE_DESPAWN_MARGIN;
+        const projHitR = Math.max(PROJECTILE_W, PROJECTILE_H) * 0.14;
         s.projectiles = s.projectiles.filter(p => {
           p.wx += p.vx * dt; p.wy += p.vy * dt;
           if (p.wx < -margin || p.wx > WORLD_W + margin || p.wy < -margin || p.wy > WORLD_H + margin) return false;
+          const dToPlayer = dist(s.player.wx, s.player.wy, p.wx, p.wy);
+          if (dToPlayer < PROJECTILE_NEAR_RADIUS && dToPlayer > PLAYER_HITBOX_RADIUS + projHitR + 2) {
+            playNearLaserSfx(now);
+          }
           if (circleCircle(s.player.wx, s.player.wy, PLAYER_HITBOX_RADIUS, p.wx, p.wy, projHitR)) {
             s.playerHP -= d.projDmg;
+            playDamageSfx();
             for (let k = 0; k < 6; k++) {
               const a = Math.random() * Math.PI * 2, sp = 40 + Math.random() * 80;
               s.particles.push({ wx: p.wx, wy: p.wy, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, born: now, life: 350 + Math.random() * 200, r: 2 + Math.random() * 3, color: '255,120,40' });
@@ -481,6 +663,7 @@ export default function DodgeGame() {
             aoe.exploded = true; aoe.showExplosion = true; aoe.explosionLife = 0;
             if (dist(s.player.wx, s.player.wy, aoe.wx, aoe.wy) < aoe.radius + PLAYER_HITBOX_RADIUS) {
               s.playerHP -= d.aoeDmg;
+              playDamageSfx();
               for (let k = 0; k < 10; k++) {
                 const a = Math.random() * Math.PI * 2, sp = 50 + Math.random() * 100;
                 s.particles.push({ wx: aoe.wx + Math.cos(a) * 20, wy: aoe.wy + Math.sin(a) * 20, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, born: now, life: 400 + Math.random() * 250, r: 3 + Math.random() * 4, color: '255,80,30' });
@@ -501,16 +684,18 @@ export default function DodgeGame() {
     stateRef.current.lastTime = performance.now();
     rafRef.current = requestAnimationFrame(loop);
     return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-  }, [draw]);
+  }, [draw, playDamageSfx, playNearLaserSfx]);
 
   return (
     <div className="fixed inset-0 overflow-hidden bg-black">
       <a
         href="https://mario-belmonte.com/games"
-        className="fixed top-3 left-3 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-lg
-                   bg-gray-900/80 hover:bg-gray-800/90 border border-gray-700/50
-                   text-gray-300 hover:text-white text-sm font-medium
-                   transition-colors duration-150 backdrop-blur-sm no-underline"
+        className="fixed top-3 left-3 z-50 inline-flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 rounded-xl
+                   border border-cyan-300/30 bg-gradient-to-b from-slate-800/85 to-slate-950/85
+                   text-slate-100 text-sm sm:text-base font-semibold tracking-wide
+                   shadow-[0_8px_24px_rgba(0,0,0,0.35)] backdrop-blur-md no-underline
+                   transition-all duration-200 hover:-translate-y-0.5 hover:border-cyan-200/55 hover:shadow-[0_10px_28px_rgba(56,189,248,0.25)]
+                   focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/65 active:translate-y-0"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
         Back to Games
