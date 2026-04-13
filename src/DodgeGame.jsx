@@ -198,6 +198,11 @@ export default function DodgeGame() {
     const bag = ensureAudio();
     if (!bag?.ctx) return;
     if (bag.ctx.state === 'suspended') bag.ctx.resume();
+
+    // Retry MP3 start on direct user gesture; some browsers require this.
+    if (phaseRef.current === 'playing' && gameAudioRef.current) {
+      gameAudioRef.current.play().catch(() => {});
+    }
   }, [ensureAudio]);
 
   const stopBgm = useCallback(() => {
@@ -307,23 +312,26 @@ export default function DodgeGame() {
 
   const setBgmMode = useCallback((mode) => {
     const bag = ensureAudio();
-    if (!bag?.ctx || bag.ctx.state !== 'running') return;
-    if (bag.bgmMode === mode) return;
+    if (bag?.bgmMode === mode) return;
 
     // Stop MP3 if leaving game mode
-    if (bag.bgmMode === 'game' && gameAudioRef.current) {
+    if (bag?.bgmMode === 'game' && gameAudioRef.current) {
       gameAudioRef.current.pause();
       gameAudioRef.current.currentTime = 0;
     }
     stopBgm();
 
     if (mode === 'game') {
-      bag.bgmMode = 'game';
       if (gameAudioRef.current) {
+        gameAudioRef.current.volume = musicVolume;
         gameAudioRef.current.play().catch(() => {});
       }
+      if (bag) bag.bgmMode = 'game';
       return;
     }
+
+    // Procedural BGM uses WebAudio and only starts when the context is running.
+    if (!bag?.ctx || bag.ctx.state !== 'running') return;
 
     const ctx = bag.ctx;
     const intervalMs = mode === 'menu' ? 880 : 320;
@@ -347,7 +355,7 @@ export default function DodgeGame() {
     const id = window.setInterval(tick, intervalMs);
     bag.bgmMode = mode;
     bag.bgmStop = () => window.clearInterval(id);
-  }, [ensureAudio, playTone, stopBgm]);
+  }, [ensureAudio, musicVolume, playTone, stopBgm]);
 
   useEffect(() => {
     if (gamePhase === 'playing') setBgmMode('game');
@@ -1061,7 +1069,7 @@ export default function DodgeGame() {
         Back to Games
       </a>
       <canvas ref={canvasRef} className="block w-full h-full" style={{ cursor: "url('/cursor.svg') 20 20, crosshair" }} />
-      <audio ref={gameAudioRef} src="/Wind_Wall_Panic.mp3" loop preload="auto" />
+      <audio ref={gameAudioRef} src="/Wind_Wall_Panic.mp3" loop preload="auto" playsInline />
       <div
         onContextMenu={e => e.preventDefault()}
         style={{
