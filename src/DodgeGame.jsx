@@ -152,6 +152,7 @@ export default function DodgeGame() {
     diff: DIFFICULTIES.normal, cw: 1200, ch: 800,
   });
   const rafRef = useRef(null);
+  const rightHoldRef = useRef({ active: false, pointerId: null });
   const audioRef = useRef({
     ctx: null,
     master: null,
@@ -532,30 +533,39 @@ export default function DodgeGame() {
       const alpha = pulse < 0.5 ? 0.95 : 0.2;
       const color = w.type === 'lux' ? `rgba(255, 110, 110, ${alpha.toFixed(3)})` : `rgba(255, 190, 110, ${alpha.toFixed(3)})`;
       const size = w.type === 'lux' ? 28 : 24;
-      const pad = 24;
+      const pad = 20;
+      const edgeOffset = 18;
       const lanePos = w.lanePos ?? (w.side === 'top' || w.side === 'bottom' ? WORLD_W / 2 : WORLD_H / 2);
-      let cx = CW / 2;
-      let cy = CH / 2;
+      const center = proj.worldToScreen(WORLD_W / 2, WORLD_H / 2);
+      let cx = center.sx;
+      let cy = center.sy;
       if (w.side === 'top') {
         const anchor = proj.worldToScreen(clamp(lanePos, 0, WORLD_W), 0);
-        cx = clamp(anchor.sx, pad, CW - pad);
-        cy = pad;
+        cx = anchor.sx;
+        cy = anchor.sy;
       }
       if (w.side === 'right') {
         const anchor = proj.worldToScreen(WORLD_W, clamp(lanePos, 0, WORLD_H));
-        cx = CW - pad;
-        cy = clamp(anchor.sy, pad, CH - pad);
+        cx = anchor.sx;
+        cy = anchor.sy;
       }
       if (w.side === 'bottom') {
         const anchor = proj.worldToScreen(clamp(lanePos, 0, WORLD_W), WORLD_H);
-        cx = clamp(anchor.sx, pad, CW - pad);
-        cy = CH - pad;
+        cx = anchor.sx;
+        cy = anchor.sy;
       }
       if (w.side === 'left') {
         const anchor = proj.worldToScreen(0, clamp(lanePos, 0, WORLD_H));
-        cx = pad;
-        cy = clamp(anchor.sy, pad, CH - pad);
+        cx = anchor.sx;
+        cy = anchor.sy;
       }
+
+      const vx = cx - center.sx;
+      const vy = cy - center.sy;
+      const vLen = Math.max(1, Math.hypot(vx, vy));
+      cx = clamp(cx + (vx / vLen) * edgeOffset, pad, CW - pad);
+      cy = clamp(cy + (vy / vLen) * edgeOffset, pad, CH - pad);
+
       const angle = w.side === 'top' ? 0 : w.side === 'right' ? Math.PI / 2 : w.side === 'bottom' ? Math.PI : -Math.PI / 2;
 
       ctx.save();
@@ -716,11 +726,30 @@ export default function DodgeGame() {
       if (phase === 'menu' || phase === 'dead') { startGame(); return; }
       const { wx, wy } = wc(e);
       const s = stateRef.current;
+      rightHoldRef.current = { active: true, pointerId: e.pointerId };
       s.playerTarget = { wx, wy };
       s.ripples.push({ wx, wy, born: performance.now(), life: 600, maxR: 32 });
     };
 
-    const onMove = (e) => { const { wx, wy } = wc(e); stateRef.current.mouseWx = wx; stateRef.current.mouseWy = wy; };
+    const onMove = (e) => {
+      const { wx, wy } = wc(e);
+      const s = stateRef.current;
+      s.mouseWx = wx;
+      s.mouseWy = wy;
+      const hold = rightHoldRef.current;
+      if (phaseRef.current === 'playing' && hold.active && hold.pointerId === e.pointerId) {
+        s.playerTarget = { wx, wy };
+      }
+    };
+    const onPointerUp = (e) => {
+      const hold = rightHoldRef.current;
+      if (hold.active && hold.pointerId === e.pointerId) {
+        rightHoldRef.current = { active: false, pointerId: null };
+      }
+    };
+    const onPointerCancel = () => {
+      rightHoldRef.current = { active: false, pointerId: null };
+    };
     const blockContextMenu = (e) => e.preventDefault();
 
     const onKey = (e) => {
@@ -745,9 +774,20 @@ export default function DodgeGame() {
 
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointermove', onMove, { passive: true });
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerCancel);
+    canvas.addEventListener('pointerleave', onPointerCancel);
     canvas.addEventListener('contextmenu', blockContextMenu);
     window.addEventListener('keydown', onKey);
-    return () => { canvas.removeEventListener('pointerdown', onPointerDown); canvas.removeEventListener('pointermove', onMove); canvas.removeEventListener('contextmenu', blockContextMenu); window.removeEventListener('keydown', onKey); };
+    return () => {
+      canvas.removeEventListener('pointerdown', onPointerDown);
+      canvas.removeEventListener('pointermove', onMove);
+      canvas.removeEventListener('pointerup', onPointerUp);
+      canvas.removeEventListener('pointercancel', onPointerCancel);
+      canvas.removeEventListener('pointerleave', onPointerCancel);
+      canvas.removeEventListener('contextmenu', blockContextMenu);
+      window.removeEventListener('keydown', onKey);
+    };
   }, [goToMenu, playFlashSfx, setBgmMode, startGame, unlockAudio]);
 
   // ── Game loop ──────────────────────────────────────────────────────────────
@@ -914,14 +954,14 @@ export default function DodgeGame() {
     <div className="fixed inset-0 overflow-hidden bg-black">
       <a
         href="https://mario-belmonte.com/games"
-        className="fixed top-3 left-3 z-50 inline-flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 rounded-xl
+        className="fixed top-3 left-3 z-50 inline-flex items-center justify-center gap-2 px-5 py-2.5 sm:px-6 sm:py-3 rounded-2xl min-w-[230px] sm:min-w-[260px] whitespace-nowrap
                    border border-cyan-300/30 bg-gradient-to-b from-slate-800/85 to-slate-950/85
-                   text-slate-100 text-sm sm:text-base font-semibold tracking-wide
+                   text-slate-100 text-base sm:text-[1.75rem] font-semibold tracking-wide
                    shadow-[0_8px_24px_rgba(0,0,0,0.35)] backdrop-blur-md no-underline
                    transition-all duration-200 hover:-translate-y-0.5 hover:border-cyan-200/55 hover:shadow-[0_10px_28px_rgba(56,189,248,0.25)]
                    focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/65 active:translate-y-0"
       >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
         Back to Games
       </a>
       <canvas ref={canvasRef} className="block w-full h-full cursor-crosshair" />
